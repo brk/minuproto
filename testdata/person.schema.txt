@@ -1,0 +1,114 @@
+( nodes = [
+    ( id = 16231856196477544767,
+      displayName = "person.capnp:Person.PhoneNumber.Type",
+      scopeId = 15459545962285174881,
+      nestedNodes = [],
+      enum = (
+        enumerants = [
+          (name = "mobile"),
+          (name = "home", codeOrder = 1),
+          (name = "work", codeOrder = 2) ] ) ),
+    ( id = 17103488608928808786,
+      displayName = "person.capnp:Person",
+      scopeId = 15832876314001345334,
+      nestedNodes = [
+        ( name = "PhoneNumber",
+          id = 15459545962285174881 ) ],
+      struct = (
+        pointerCount = 4,
+        preferredListEncoding = inlineComposite,
+        fields = [
+          ( name = "name",
+            slot = (
+              type = (text = void),
+              defaultValue = (text = "") ),
+            ordinal = (explicit = 0) ),
+          ( name = "email",
+            codeOrder = 2,
+            slot = (
+              offset = 1,
+              type = (text = void),
+              defaultValue = (text = "") ),
+            ordinal = (explicit = 1) ),
+          ( name = "phones",
+            codeOrder = 3,
+            slot = (
+              offset = 2,
+              type = (
+                list = (
+                  elementType = (
+                    struct = (
+                      typeId = 15459545962285174881 ) ) ) ),
+              defaultValue = (list = <opaque object>) ),
+            ordinal = (explicit = 2) ),
+          ( name = "birthdate",
+            codeOrder = 1,
+            slot = (
+              offset = 3,
+              type = (
+                struct = (
+                  typeId = 17233523631960263827 ) ),
+              defaultValue = (struct = <opaque object>) ),
+            ordinal = (explicit = 3) ) ] ) ),
+    ( id = 17233523631960263827,
+      displayName = "person.capnp:Date",
+      scopeId = 15832876314001345334,
+      nestedNodes = [],
+      struct = (
+        dataWordCount = 1,
+        preferredListEncoding = fourBytes,
+        fields = [
+          ( name = "year",
+            slot = (
+              type = (int16 = void),
+              defaultValue = (int16 = 0) ),
+            ordinal = (explicit = 0) ),
+          ( name = "month",
+            codeOrder = 1,
+            slot = (
+              offset = 2,
+              type = (uint8 = void),
+              defaultValue = (uint8 = 0) ),
+            ordinal = (explicit = 1) ),
+          ( name = "day",
+            codeOrder = 2,
+            slot = (
+              offset = 3,
+              type = (uint8 = void),
+              defaultValue = (uint8 = 0) ),
+            ordinal = (explicit = 2) ) ] ) ),
+    ( id = 15459545962285174881,
+      displayName = "person.capnp:Person.PhoneNumber",
+      scopeId = 17103488608928808786,
+      nestedNodes = [
+        ( name = "Type",
+          id = 16231856196477544767 ) ],
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 1,
+        preferredListEncoding = inlineComposite,
+        fields = [
+          ( name = "number",
+            slot = (
+              type = (text = void),
+              defaultValue = (text = "") ),
+            ordinal = (explicit = 0) ),
+          ( name = "type",
+            codeOrder = 1,
+            slot = (
+              type = (
+                enum = (
+                  typeId = 16231856196477544767 ) ),
+              defaultValue = (enum = 0) ),
+            ordinal = (explicit = 1) ) ] ) ),
+    ( id = 15832876314001345334,
+      displayName = "person.capnp",
+      nestedNodes = [
+        ( name = "Person",
+          id = 17103488608928808786 ),
+        ( name = "Date",
+          id = 17233523631960263827 ) ] ) ],
+  requestedFiles = [
+    ( id = 15832876314001345334,
+      filename = "person.capnp",
+      imports = [] ) ] )
