@@ -12,6 +12,11 @@ import Text.PrettyPrint.ANSI.Leijen
 
 import Debug.Trace(trace)
 
+import Data.Map(Map)
+import qualified Data.Map as Map
+import Control.Monad.State
+import Data.List(intersperse, isPrefixOf)
+
 wordLE n a b = let cast = fromInteger . toInteger in
                shift (cast a) n .|. cast b
 
@@ -112,7 +117,10 @@ data Object = StructObj ByteString [Object]
             | InvalidObj String
              deriving Show
 
-unStrObj (StrObj str) = str
+dropLastByte str = take (length str - 1) str
+unStrObj (StrObj str) = dropLastByte str
+unStrObj (StructObj bs []) | BS.null bs = ""
+unStrObj other = error $ "unStrObj wasn't expecting " ++ show other
 
 instance Pretty Object where
   pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"
@@ -239,14 +247,138 @@ parseSegment bs =
   unflatten 99999 bs $ derefStructPointer ptr bs
 
 main = do
-  rawbytes <- BS.readFile "person.schema.bin"
+  rawbytes <- BS.readFile "testdata/person.schema.bin"
   let segments@(seg:_) = splitSegments rawbytes
   let obj = parseSegment seg
   --putDoc $ pretty obj <> line
   print $ mkCodeGeneratorRequest obj
   mapM (\x -> putStrLn "" >> print x) $ cgrNodes $ mkCodeGeneratorRequest obj
+  print $ "~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+  putDoc $ evalState (cgHS (mkCodeGeneratorRequest obj)) (CG_State (Map.empty))
 
 instance Pretty Word64 where pretty w = text (show w)
+
+------------------------------------------------------------
+
+data CG_State =
+     CG_State (Map Word64 String)
+
+type CG t = State CG_State t
+
+class CGHS t where
+  cgHS :: t -> CG Doc
+
+instance CGHS CodeGeneratorRequest where
+  cgHS cgr = do
+    mapM_ denoteNodeId (cgrNodes cgr)
+    ns <- mapM cgHS (cgrNodes cgr)
+    return $ vsep ns
+
+spanList _ [] = ([],[])
+spanList func list@(x:xs) =
+    if func list
+       then (x:ys,zs)
+       else ([],list)
+    where (ys,zs) = spanList func xs
+
+breakList :: ([a] -> Bool) -> [a] -> ([a], [a])
+breakList func = spanList (not . func)
+
+split :: Eq a => [a] -> [a] -> [[a]]
+split _ [] = []
+split delim str =
+    let (firstline, remainder) = breakList (isPrefixOf delim) str
+        in 
+        firstline : case remainder of
+                                   [] -> []
+                                   x -> if x == delim
+                                        then [] : []
+                                        else split delim 
+                                                 (drop (length delim) x)
+sjoin delim s = concat (intersperse delim s)
+replace old new s = sjoin new . split old $ s
+legalizeTypeName fs = case split ":" fs of
+                        [_, s] -> replace "." "_" s
+                        [s]    -> replace "." "_" s
+
+denoteNodeId node = do
+  denoteId (nodeId node) (nodeDisplayName node)
+
+instance CGHS Node where
+  cgHS node = do
+    nu <- cgHS (nodeUnion node)
+    return $
+      text "data" <+> text (nodeDisplayName node) <+> text "=" <+> text "{" <+> text "--" <+> pretty (nodeId node)
+        <$> nu
+        <$> text "}"
+
+instance CGHS NodeUnion where
+  cgHS (NodeFile) = return $ text " -- <NodeFile>"
+  cgHS (NodeConst t v) = return $ text "<NodeConst>"
+  cgHS (NodeInterface _) = return $ text "NodeInterface"
+  cgHS (NodeEnum enums) = do
+    es <- mapM cgHS enums
+    return $ cases es
+  cgHS ns@(NodeStruct {}) = do
+    fs <- mapM cgHS (nodeStruct_fields ns)
+    return $ embedded fs
+
+instance CGHS Enumerant where
+  cgHS e =
+    return $ text (enumerantName e)
+
+instance CGHS Field where
+  cgHS f = do
+    fu <- cgHS $ fieldUnion f
+    return $ text (fieldName f) <+> fu
+
+instance CGHS FieldUnion where
+  cgHS (FieldSlot _ t _) = do
+     tx <- cgHS t
+     return $ text "::" <+> tx
+  cgHS (FieldGroup _) = return $ text "<...FieldGroup...>"
+
+instance CGHS Type_ where
+  cgHS type_ =
+    case type_ of
+      Type_Void        -> return $ text "()" 
+      Type_Bool        -> return $ text "Bool"
+      Type_Int8        -> return $ text "Int8"
+      Type_Int16       -> return $ text "Int16"
+      Type_Int32       -> return $ text "Int32"
+      Type_Int64       -> return $ text "Int64" 
+      Type_UInt8       -> return $ text "Word8"
+      Type_UInt16      -> return $ text "Word16"
+      Type_UInt32      -> return $ text "Word32"
+      Type_UInt64      -> return $ text "Word64"
+      Type_Float32     -> return $ text "Float"
+      Type_Float64     -> return $ text "Double" 
+      Type_Text        -> return $ text "String"
+      Type_Data        -> return $ text "ByteString"
+      Type_List      t -> do tx <- cgHS t
+                             return $ text "[" <> tx <> text "]"
+      Type_Enum      w -> liftM text (lookupId w)
+      Type_Struct    w -> liftM text (lookupId w)
+      Type_Interface w -> liftM text (lookupId w)
+      Type_Object      -> return $ text "<...object...>"
+
+cases :: [Doc] -> Doc
+cases (doc:docs) = vsep $ (text " " <+> doc) : (map (\d -> text "|" <+> d) docs)
+
+embedded :: [Doc] -> Doc
+embedded docs = vsep $ map (\d -> text ";" <+> d) docs
+
+denoteId :: Word64 -> String -> CG ()
+denoteId w s = do
+  CG_State m <- get
+  put $ CG_State (Map.insert w s m)
+
+lookupId :: Word64 -> CG String
+lookupId w = do
+  CG_State m <- get
+  return $ case Map.lookup w m of
+              Nothing -> "<unknown!>"
+              Just s  -> s
 
 ------------------------------------------------------------
 
@@ -258,12 +390,21 @@ data CodeGeneratorRequest = CodeGeneratorRequest {
 data Node = Node { nodeId :: Word64
                  , nodeScopeId :: Word64
                  , nodeDisplayPrefix :: Word32
-                 , nodeDisplayName :: String
+                 , nodeDisplayName_ :: String
                  , nodeUnion :: NodeUnion
+                 , nodeNestedNodes :: [NestedNode]
 } deriving Show
 
+nodeDisplayName n = legalizeTypeName $ nodeDisplayName_ n
+
+data NestedNode =
+     NestedNode { nestedNode_name :: String
+                , nestedNode_id   :: Word64
+     } deriving Show
+
 data NodeUnion =
-     NodeStruct { nodeStruct_dataWordCount :: Word16
+     NodeFile
+   | NodeStruct { nodeStruct_dataWordCount :: Word16
                 , nodeStruct_pointerCount :: Word16
                 , nodeStruct_preferredListEncoding :: Word16
                 , nodeStruct_isGroup :: Word8
@@ -278,21 +419,23 @@ data NodeUnion =
   -- | NodeAnnotation { nodeAnnotation
   deriving Show
 
-data Struct = Struct {
-
-} deriving Show
-
 data Field = Field {
       fieldName :: String
 --  , fieldSlot :: ()
     , fieldCodeOrder :: Word16
     , fieldDiscriminant :: Word16
     , fieldUnion :: FieldUnion
+    , fieldOrdinal :: FieldOrdinal
 } deriving Show
 
 data FieldUnion =
-     FieldSlot
-   | FieldGroup
+     FieldSlot  Word32 Type_ Value
+   | FieldGroup Word64
+  deriving Show
+
+data FieldOrdinal =
+     FieldOrdinalImplicit 
+   | FieldOrdinalExplicit Word16
   deriving Show
 
 data RequestedFile = RequestedFile {
@@ -318,6 +461,7 @@ data Type_ =
    | Type_Int32
    | Type_Int64
    | Type_UInt8
+   | Type_UInt16
    | Type_UInt32
    | Type_UInt64
    | Type_Float32
@@ -329,7 +473,7 @@ data Type_ =
    | Type_Struct     Word64
    | Type_Interface  Word64
    | Type_Object
-deriving Show
+   deriving Show
 
 data Value =
      Value_Void
@@ -339,6 +483,7 @@ data Value =
    | Value_Int32    Word32
    | Value_Int64    Word64
    | Value_UInt8    Word8
+   | Value_UInt16   Word16
    | Value_UInt32   Word32
    | Value_UInt64   Word64
    | Value_Float32  Float
@@ -346,11 +491,11 @@ data Value =
    | Value_Text     String
    | Value_Data     String
    | Value_List       
-   | Value_Enum       Word16
+   | Value_Enum     Word16
    | Value_Struct     
    | Value_Interface  
-   | Value_Object
-deriving Show
+   | Value_Object   Object
+   deriving Show
 
 
 mapL _ f (ListObj vals) = map f vals
@@ -366,49 +511,101 @@ mkRequestedFile (StructObj bs [StrObj name, _imports]) = RequestedFile id name
 mkRequestedFile other = error $ "mkRequestedFile " ++ show (pretty other)
 
 mkNode          (StructObj bs
-                           (StrObj displayName:
+                           (displayNameStrObj:
                             ListObj nestedNodes:
                             annotations:rest)) =
-    Node id scopeId prefixLen displayName union
+    Node id scopeId prefixLen (unStrObj displayNameStrObj) union (map mkNestedNode nestedNodes)
       where
           id        = at bs64  0 bs
           prefixLen = at bs32  8 bs
           which     = at bs16 12 bs
           scopeId   = at bs64 16 bs
           union     = case which of
-                        0 -> NodeStruct (at bs16 14 bs)
+                        0 -> NodeFile
+                        1 -> NodeStruct (at bs16 14 bs)
                                         (at bs16 24 bs)
                                         (at bs16 26 bs)
                                         (at bs8  28 bs)
                                         (at bs16 30 bs)
                                         (at bs16 32 bs)
                                         (mapL "NodeFields" mkField (rest !! 0))
-                        1 -> NodeEnum (mapL "NodeE" mkEnumerant (rest !! 0))
-                        2 -> NodeInterface (mapL "NodeI" mkMethod (rest !! 0))
-                        3 -> NodeConst (error "NodeConstType") (error "NodeConstValue")-- (rest !! 0) (rest !! 1)
-                        4 -> error "NodeAnnotation"  -- NodeAnnotation (error "NodeAnnotation")
-                        _ -> error "Unknown Node discriminant"
+                        2 -> NodeEnum (mapL "NodeE" mkEnumerant (rest !! 0))
+                        3 -> NodeInterface (mapL "NodeI" mkMethod (rest !! 0))
+                        4 -> NodeConst (error "NodeConstType") (error "NodeConstValue")-- (rest !! 0) (rest !! 1)
+                        5 -> error $ "NodeAnnotation"  -- NodeAnnotation (error "NodeAnnotation")
+                        v -> error $ "Unknown Node discriminant:" ++ show v
 
 mkNode other = error $ "mkNode couldn't handle\n" ++ show (pretty other)
 
 mkField  (StructObj bs (StrObj name:annotations:rest)) =
-  Field name codeOrder discriminantValue t1
+  Field name codeOrder discriminantValue t1 explicit
     where codeOrder = at bs16 0 bs
-          discriminantValue = (at bs16 2 bs) `xor` 65535
+          discriminantValue = (at bs16 2 bs) `xor` (65535 :: Word16)
           which = at bs16 8 bs
           t1 = case which of
-                0 -> FieldSlot (at bs32 4)
+                0 -> FieldSlot (at bs32 4 bs)
                                (mkType  $ rest !! 0)
                                (mkValue $ rest !! 1)
-                1 -> FieldGroup
+                1 -> FieldGroup (at bs64 16 bs)
                 _ -> error "Field which1"
+          explicit = case at bs16 10 bs of
+                       0 -> FieldOrdinalImplicit
+                       1 -> FieldOrdinalExplicit (at bs16 12 bs)
 
 mkField other = error $ "mkField couldn't handle\n" ++ show (pretty other)
 
+mkType :: Object -> Type_
+mkType (StructObj bs objs) =
+  let which = at bs16 0 bs in
+  case which of
+    0  -> Type_Void
+    1  -> Type_Bool
+    2  -> Type_Int8
+    3  -> Type_Int16
+    4  -> Type_Int32
+    5  -> Type_Int64
+    6  -> Type_UInt8
+    7  -> Type_UInt16
+    8  -> Type_UInt32
+    9  -> Type_UInt64
+    10 -> Type_Float32
+    11 -> Type_Float64
+    12 -> Type_Text
+    13 -> Type_Data
+    14 -> Type_List       (mkType $ objs !! 0)
+    15 -> Type_Enum       (at bs64 8 bs)
+    16 -> Type_Struct     (at bs64 8 bs)
+    17 -> Type_Interface  (at bs64 8 bs)
+    18 -> Type_Object
 
+mkValue :: Object -> Value
+mkValue (StructObj bs objs) =
+  let which = at bs16 0 bs in
+  case which of
+    0  -> Value_Void
+    1  -> Value_Bool     (at bs8  2 bs `mod` 2 == 1)
+    2  -> Value_Int8     (at bs8  2 bs)
+    3  -> Value_Int16    (at bs16 2 bs)
+    4  -> Value_Int32    (at bs32 2 bs)
+    5  -> Value_Int64    (at bs64 2 bs)
+    6  -> Value_UInt8    (at bs8  2 bs)
+    7  -> Value_UInt16   (at bs16 2 bs)
+    8  -> Value_UInt32   (at bs32 2 bs)
+    9  -> Value_UInt64   (at bs64 2 bs)
+    10 -> Value_Float32  (error $ "Value_Float32")
+    11 -> Value_Float64  (error $ "Value_Float64")
+    12 -> Value_Text     (unStrObj $ objs !! 0)
+    13 -> Value_Data     (unStrObj $ objs !! 0)
+    14 -> Value_List       
+    15 -> Value_Enum     (at bs16 2 bs)
+    16 -> Value_Struct     
+    17 -> Value_Interface  
+    18 -> Value_Object   (objs !! 0)
 
 mkMethod (StructObj bs (StrObj name:rest)) =
   Method name (at bs16 0 bs)
+
+mkNestedNode (StructObj bs [name]) = NestedNode (unStrObj name) (at bs64 0 bs)
 
 mkEnumerant (StructObj bs (StrObj name:rest)) =
   Enumerant name (at bs16 0 bs)
