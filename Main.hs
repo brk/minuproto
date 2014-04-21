@@ -7,6 +7,7 @@ import qualified Data.ByteString as BS
 import Data.ByteString(ByteString)
 import Data.Char(chr)
 import Data.List((!!))
+import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
 import Text.PrettyPrint.ANSI.Leijen
 
@@ -50,12 +51,15 @@ bs64 bs0 = let (w0, bs1) = bs32 bs0 in
            (w64 w1 w0, bs2)
 
 at :: (ByteString -> (word, ByteString)) -> Int64 -> ByteString -> word
+at _ n bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
 at f n bs = let (v, _) = f (BS.drop (fromIntegral n) bs) in v
 
 isOdd n = (n `mod` 2) == 0
 
-newtype WordOffset = WordOffset { unWordOffset :: Int64 } deriving (Show, Eq, Ord)
+newtype WordOffset = WordOffset Int64 deriving (Show, Eq, Ord)
 newtype ByteOffset = ByteOffset Int64 deriving (Show, Eq, Ord)
+
+unWordOffset (WordOffset i) = i
 
 liftWordOffset1 op (WordOffset a) = WordOffset (op a)
 liftWordOffset2 op (WordOffset a) (WordOffset b) = WordOffset (op a b)
@@ -73,7 +77,6 @@ word :: ByteString -> WordOffset -> Word64
 word bs (WordOffset nw) =                at bs64 (8 * nw) bs
 
 byte bs (ByteOffset nb) = fromIntegral $ at bs8  nb bs
-byt4 bs (ByteOffset nb) = fromIntegral $ at bs8  nb bs
 
 slice off len bs = BS.take (fromIntegral len) (BS.drop (fromIntegral off) bs)
 sliceWords off len bs = slice (8 * off) (8 * len) bs
@@ -97,18 +100,21 @@ splitSegments rawbytes =
   let startsegpos = 4 * (fromIntegral numsegs + (if isOdd numsegs then 0 else 1)) in
   let allsegbytes = BS.drop startsegpos rawbytes in
   let segoffsets = scanl (+) 0 segsizes in
-  [sliceWords offset len allsegbytes | (offset, len) <- zip segoffsets segsizes]
+  let segs = [sliceWords offset len allsegbytes | (offset, len) <- zip segoffsets segsizes] in
+  trace (show segsizes ++ " ;; " ++ show (BS.length rawbytes) ++ " vs " ++ show (zip segoffsets segsizes) ++ " ;; " ++ show (map BS.length segs)) $
+    segs
 
---type Pointer = (Int64, Word64, Word64)
-data Pointer = StructPtr String WordOffset Word64      Word64 -- Origin, Offset, # data words, # ptr words
-             | ListPtr   WordOffset WordOffset ListEltSize Word64 -- Origin, Offset, eltsize, # elts
-             | InvalidPtr
-             deriving Show
+
+data Pointer = StructPtr ByteString String WordOffset Word64      Word64 -- PointsInto, Origin, Offset, # data words, # ptr words
+             | ListPtr   ByteString WordOffset WordOffset ListEltSize Word64 -- PointsInto, Origin, Offset, eltsize, # elts
+
+instance Show Pointer where
+  show (StructPtr _ _ off ndw npw) = "(StructPtr " ++ show ndw ++ " " ++ show npw ++ ")"
+  show (ListPtr   _ orig off eltsz nelts) = "(ListPtr " ++ show orig ++ " " ++ show off ++ " " ++ show nelts ++ ")"
 
 data FlatObj = StructFlat ByteString [Pointer]
              | ListFlat   [FlatObj]
              | StrFlat    String
-             | InvalidFlat
              deriving Show
 
 data Object = StructObj ByteString [Object]
@@ -131,17 +137,16 @@ instance Pretty Object where
   pretty (InvalidObj          str) = parens $ text "InvalidObj:" <+> text str
   pretty (StrObj              str) = text (show str)
 
-parseUnknownPointerAt :: String -> ByteString -> WordOffset -> Pointer
-parseUnknownPointerAt msg bs o =
+parseUnknownPointerAt :: String -> ByteString -> [ByteString] -> WordOffset -> Pointer
+parseUnknownPointerAt msg bs segs o =
  --trace ("parseUnknownPointerAt " ++ show o ++ " " ++ msg) $
   let w = bs `word` o in
   let (ptrtag, _) = splitU 2 w in
   case ptrtag of
     0 -> parseStructPointerAt bs o
     1 -> parseListPointerAt bs o
-    2 -> error $ "parseInterSegmentPointerAt bs " ++ show o
-    _ -> -- error $ "parseUnknownPointer: " ++ show ptrtag ++ " At: " ++ show o
-          InvalidPtr
+    2 -> parseInterSegmentPointerAt bs segs o
+    _ -> error $ "parseUnknownPointer: " ++ show ptrtag ++ " At: " ++ show o
 
 parseStructPointerAt :: ByteString -> WordOffset -> Pointer
 parseStructPointerAt bs o =
@@ -150,16 +155,18 @@ parseStructPointerAt bs o =
   let ( b, w1) = splitS 30 w0 in
   let ( c, w2) = splitU 16 w1 in
   let ( d, w3) = splitU 16 w2 in
-  StructPtr (show o) (WordOffset b + o + 1) c d
+  StructPtr bs (show o) (WordOffset b + o + 1) c d
 
 w2i :: Word64 -> Int64
 w2i = fromIntegral
 
-derefStructPointer :: Pointer -> ByteString -> FlatObj
-derefStructPointer (StructPtr origin off numdata numptrs) bs =
+derefStructPointer :: Pointer -> [ByteString] -> FlatObj
+derefStructPointer (StructPtr bs origin off numdata numptrs) segs =
   StructFlat (sliceWords (unWordOffset off) numdata bs)
-             [parseUnknownPointerAt ("fromstruct@" ++ origin) bs (off + WordOffset (w2i n))
+             [parseUnknownPointerAt ("fromstruct@" ++ origin) bs segs (off + WordOffset (w2i n))
                | n <- numdata `upby` numptrs]
+
+readStructPointerAt o bs segs = derefStructPointer (parseStructPointerAt bs o) segs
 
 parseListTagPointerAt :: ByteString -> WordOffset -> (Word64, Word64, Word64)
 parseListTagPointerAt bs o =
@@ -203,7 +210,7 @@ parseListPointerAt bs o =
   -- b is the "Offset, in words, from the end of the pointer to the
   -- start of the first element in the list. Signed."
   --trace ("list ptr @ " ++ show o ++ " had b=" ++ show b) $
-   ListPtr o (list_target_offset + (if c == 7 then 1 else 0)) (lesFor c tagptr) numelts
+   ListPtr bs o (list_target_offset + (if c == 7 then 1 else 0)) (lesFor c tagptr) numelts
 
 zeroto n =
   if n > 0 then [0 .. fromIntegral (n - 1)]
@@ -213,44 +220,69 @@ upby k n = map (+k) (zeroto n)
 
 byteOffsetOf (WordOffset o) = o * 8
 
-derefListPointer :: Pointer -> ByteString -> FlatObj
-derefListPointer ptr@(ListPtr origin off eltsize numelts) bs =
+readNthBit bs boff n =
+  let (byteoff, bitoff) = (fromIntegral n) `divMod` 8 in
+  if readBitOfByte bitoff (boff + fromIntegral byteoff) bs then '1' else '0'
+
+readBitOfByte :: Int64 -> Int64 -> ByteString -> Bool
+readBitOfByte bit byt bs =
+  let mask = (shiftL 1 (fromIntegral bit)) :: Int64 in
+  ((byte bs (ByteOffset byt)) .&. mask) == mask
+
+derefListPointer :: Pointer -> [ByteString] -> FlatObj
+derefListPointer ptr@(ListPtr bs origin off eltsize numelts) segs =
   let boff = byteOffsetOf off in
   case eltsize of
     LES_Phantom -> ListFlat (replicate (fromIntegral numelts) (StructFlat BS.empty []))
     LES_Byte1   -> StrFlat [chr $ fromIntegral $ byte bs (ByteOffset $ boff + n) | n <- zeroto numelts]
-    --LES_Byte4   -> ListFlat [StructFlat [byt4 bs (ByteOffset $ boff + 4 * n)] [] | n <- zeroto numelts]
     --LES_Word    -> ListFlat [StructFlat [word bs (off + WordOffset n)]        [] | n <- zeroto numelts]
     LES_Word    -> ListFlat [StructFlat (sliceWords (unWordOffset off + n) 1 bs)        [] | n <- zeroto numelts]
+    --LES_Bit     -> StrFlat [readNthBit bs boff n | n <- zeroto numelts]
+    LES_Bit     -> StrFlat $ "...bitlist(" ++ show numelts ++ ")..."
     LES_Composite dw pw ->
       let offsets = [off + (fromIntegral $ i * (dw + pw)) | i <- zeroto numelts] in
-      ListFlat [derefStructPointer (StructPtr (show ptr ++ ";" ++ show off') off' dw pw) bs | off' <- offsets]
+      ListFlat [derefStructPointer (StructPtr bs (show ptr ++ ";" ++ show off') off' dw pw) segs | off' <- offsets]
     _ -> error $ "can't yet parse list of elts sized " ++ show eltsize
 
-unflatten :: Int -> ByteString -> FlatObj -> Object
+-- TODO need to store bytestrings with parsed pointers for flattening to work properly.
+parseInterSegmentPointerAt :: ByteString -> [ByteString] -> WordOffset -> Pointer
+parseInterSegmentPointerAt bs segs o =
+  let w = bs `word` o in
+  let (_a, w0) = splitU 2 w in
+  let ( b, w1) = splitU 1 w0 in
+  let ( c, w2) = splitU 29 w1 in
+  let ( d, w3) = splitU 32 w2 in
+  if b == 0
+    then let bs' = segs !! fromIntegral d in
+         let pp = parseUnknownPointerAt "<<parseInterSegmentPointerAt>>" bs' segs (WordOffset (fromIntegral c)) in
+          trace ("parseInterSegmentPointerAt " ++ show o ++ "; " ++ show d ++ " " ++ show pp) $ pp
+    else error $ "parseInterSegmentPointerAt can't yet support doubly-indirect pointers."
+
+unflatten :: Int -> [ByteString] -> FlatObj -> Object
 unflatten 0 _ flat = InvalidObj $ "no gas left for " ++ show flat
-unflatten n bs (StructFlat words ptrs) = StructObj words (map (derefUnknownPointers (n - 1) bs) ptrs)
-unflatten n bs (ListFlat   flats) =        ListObj       (map (unflatten (n - 1) bs) flats)
-unflatten _ _  (StrFlat    str)   =         StrObj str
-unflatten n bs InvalidFlat = InvalidObj "unflatten invalid"
+unflatten n segs (StructFlat words ptrs) = StructObj words (map (derefUnknownPointer (n - 1) segs) ptrs)
+unflatten n segs (ListFlat   flats) =        ListObj       (map (unflatten (n - 1) segs) flats)
+unflatten _ _    (StrFlat    str)   =         StrObj str
 
-derefUnknownPointers :: Int -> ByteString -> Pointer -> Object
-derefUnknownPointers n bs ptr =
-  unflatten n bs $
+derefUnknownPointer :: Int -> [ByteString] -> Pointer -> Object
+derefUnknownPointer n segs ptr =
+  unflatten n segs $
     case ptr of
-      StructPtr {} -> derefStructPointer ptr bs
-      ListPtr   {} -> derefListPointer   ptr bs
-      InvalidPtr {} -> InvalidFlat
+      StructPtr {} -> derefStructPointer ptr segs
+      ListPtr   {} -> derefListPointer   ptr segs
 
-parseSegment bs =
-  let ptr = parseStructPointerAt bs 0 in
-  unflatten 99999 bs $ derefStructPointer ptr bs
+parseSegment :: ByteString -> [ByteString] -> Object
+parseSegment bs segs =
+  --let ptr = parseStructPointerAt bs 0 in
+  --unflatten 99999 segs $ derefStructPointer ptr segs
+  unflatten 99999 segs $ readStructPointerAt 0 bs segs
 
 main = do
-  rawbytes <- BS.readFile "testdata/person.schema.bin"
+  rawbytes <- BS.readFile "testdata/schema.schema.bin"
   let segments@(seg:_) = splitSegments rawbytes
-  let obj = parseSegment seg
+  let obj = parseSegment seg segments
   --putDoc $ pretty obj <> line
+  putStrLn $ "had this many segments: " ++ show (length segments)
   print $ mkCodeGeneratorRequest obj
   mapM (\x -> putStrLn "" >> print x) $ cgrNodes $ mkCodeGeneratorRequest obj
   print $ "~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -270,9 +302,39 @@ class CGHS t where
 
 instance CGHS CodeGeneratorRequest where
   cgHS cgr = do
+    -- Build the mapping of node ids to type names for later pretty-printing.
     mapM_ denoteNodeId (cgrNodes cgr)
+    -- Emit the data type declaration for each node.
     ns <- mapM cgHS (cgrNodes cgr)
-    return $ vsep ns
+    -- Emit builders for each node.
+    builders <- mapM emitNodeBuilder (cgrNodes cgr)
+    return $ vsep $ ns ++ builders
+
+emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node)
+
+emitNodeUnionBuilder node@(NodeStruct {}) dname = do
+  let fnname = "mk" ++ dname
+  fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
+  return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj" <+> text " = do "
+        <$> indent 4 (parens (text dname
+                               <+> hsep fieldAccessors))
+        <$> text ""
+
+emitNodeUnionBuilder other dname = do
+  let fnname = "mk" ++ dname
+  return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj" <+> text " = do "
+        <$> indent 4 (parens (text dname
+                               <+> hsep []))
+        <$> text ""
+
+emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
+  let offset = fromIntegral w * byteSizeOfType t
+  return $ text ("<"++show t ++"@("++show w++"*"++show (byteSizeOfType t)++")="++show offset++">")
+
+emitFieldAccessor f = do
+  return $ text ("<non-slot>" ++ show f)
 
 spanList _ [] = ([],[])
 spanList func list@(x:xs) =
@@ -322,6 +384,8 @@ instance CGHS NodeUnion where
   cgHS ns@(NodeStruct {}) = do
     fs <- mapM cgHS (nodeStruct_fields ns)
     return $ embedded fs
+  cgHS ns@(NodeAnnotation {}) = do
+    return $ text (show ns)
 
 instance CGHS Enumerant where
   cgHS e =
@@ -416,7 +480,20 @@ data NodeUnion =
   | NodeInterface { nodeInterface_methods :: [Method] }
   | NodeConst   { nodeConst_type :: ()
                 , nodeConst_value :: () }
-  -- | NodeAnnotation { nodeAnnotation
+  | NodeAnnotation { nodeAnnotation_type :: Type_
+                   , nodeAnnotation_file :: Bool
+                   , nodeAnnotation_const :: Bool
+                   , nodeAnnotation_enum :: Bool
+                   , nodeAnnotation_enumerant :: Bool
+                   , nodeAnnotation_struct :: Bool
+                   , nodeAnnotation_field :: Bool
+                   , nodeAnnotation_union :: Bool
+                   , nodeAnnotation_group :: Bool
+                   , nodeAnnotation_interface :: Bool
+                   , nodeAnnotation_method :: Bool
+                   , nodeAnnotation_param :: Bool
+                   , nodeAnnotation_annotation :: Bool
+                   }
   deriving Show
 
 data Field = Field {
@@ -495,6 +572,7 @@ data Value =
    | Value_Struct     
    | Value_Interface  
    | Value_Object   Object
+   | Value_ERROR
    deriving Show
 
 
@@ -512,9 +590,9 @@ mkRequestedFile other = error $ "mkRequestedFile " ++ show (pretty other)
 
 mkNode          (StructObj bs
                            (displayNameStrObj:
-                            ListObj nestedNodes:
+                            nestedNodes:
                             annotations:rest)) =
-    Node id scopeId prefixLen (unStrObj displayNameStrObj) union (map mkNestedNode nestedNodes)
+    Node id scopeId prefixLen (unStrObj displayNameStrObj) union (mapL "NestedNodes" mkNestedNode nestedNodes)
       where
           id        = at bs64  0 bs
           prefixLen = at bs32  8 bs
@@ -532,10 +610,20 @@ mkNode          (StructObj bs
                         2 -> NodeEnum (mapL "NodeE" mkEnumerant (rest !! 0))
                         3 -> NodeInterface (mapL "NodeI" mkMethod (rest !! 0))
                         4 -> NodeConst (error "NodeConstType") (error "NodeConstValue")-- (rest !! 0) (rest !! 1)
-                        5 -> error $ "NodeAnnotation"  -- NodeAnnotation (error "NodeAnnotation")
+                        5 -> NodeAnnotation (mkType $ rest !! 0)
+                                            (((at bs8 14 bs) .&. 1) /= 0)
+                                            (((at bs8 14 bs) .&. 2) /= 0)
+                                            (((at bs8 14 bs) .&. 4) /= 0)
+                                            (((at bs8 14 bs) .&. 8) /= 0)
+                                            (((at bs8 14 bs) .&. 16) /= 0)
+                                            (((at bs8 14 bs) .&. 32) /= 0)
+                                            (((at bs8 14 bs) .&. 64) /= 0)
+                                            (((at bs8 14 bs) .&. 128) /= 0)
+                                            (((at bs8 15 bs) .&. 1) /= 0)
+                                            (((at bs8 15 bs) .&. 2) /= 0)
+                                            (((at bs8 15 bs) .&. 4) /= 0)
+                                            (((at bs8 15 bs) .&. 8) /= 0)
                         v -> error $ "Unknown Node discriminant:" ++ show v
-
-mkNode other = error $ "mkNode couldn't handle\n" ++ show (pretty other)
 
 mkField  (StructObj bs (StrObj name:annotations:rest)) =
   Field name codeOrder discriminantValue t1 explicit
@@ -552,6 +640,7 @@ mkField  (StructObj bs (StrObj name:annotations:rest)) =
                        0 -> FieldOrdinalImplicit
                        1 -> FieldOrdinalExplicit (at bs16 12 bs)
 
+mkField other = Field "<erroneous field>" 0 0 (FieldGroup 0) FieldOrdinalImplicit
 mkField other = error $ "mkField couldn't handle\n" ++ show (pretty other)
 
 mkType :: Object -> Type_
@@ -592,8 +681,8 @@ mkValue (StructObj bs objs) =
     7  -> Value_UInt16   (at bs16 2 bs)
     8  -> Value_UInt32   (at bs32 2 bs)
     9  -> Value_UInt64   (at bs64 2 bs)
-    10 -> Value_Float32  (error $ "Value_Float32")
-    11 -> Value_Float64  (error $ "Value_Float64")
+    10 -> Value_Float32  (wordToFloat  $ at bs32 2 bs)
+    11 -> Value_Float64  (wordToDouble $ at bs64 2 bs)
     12 -> Value_Text     (unStrObj $ objs !! 0)
     13 -> Value_Data     (unStrObj $ objs !! 0)
     14 -> Value_List       
@@ -601,6 +690,7 @@ mkValue (StructObj bs objs) =
     16 -> Value_Struct     
     17 -> Value_Interface  
     18 -> Value_Object   (objs !! 0)
+    _  -> Value_ERROR
 
 mkMethod (StructObj bs (StrObj name:rest)) =
   Method name (at bs16 0 bs)
@@ -611,3 +701,24 @@ mkEnumerant (StructObj bs (StrObj name:rest)) =
   Enumerant name (at bs16 0 bs)
 
 
+byteSizeOfType type_ =
+    case type_ of
+      Type_Void        -> 0
+      Type_Bool        -> 1
+      Type_Int8        -> 1
+      Type_Int16       -> 2
+      Type_Int32       -> 4
+      Type_Int64       -> 8
+      Type_UInt8       -> 1
+      Type_UInt16      -> 2
+      Type_UInt32      -> 4
+      Type_UInt64      -> 8
+      Type_Float32     -> 4
+      Type_Float64     -> 8
+      Type_Text        -> 8
+      Type_Data        -> 8
+      Type_List      _ -> 8
+      Type_Enum      _ -> 8
+      Type_Struct    _ -> 8
+      Type_Interface _ -> 8
+      Type_Object      -> 8
