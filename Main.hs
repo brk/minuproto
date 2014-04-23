@@ -5,7 +5,7 @@ import Data.Bits
 import Data.Word
 import qualified Data.ByteString as BS
 import Data.ByteString(ByteString)
-import Data.Char(chr)
+import Data.Char(chr, toUpper)
 import Data.List((!!))
 import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
@@ -49,6 +49,8 @@ bs64 :: ByteString -> (Word64, ByteString)
 bs64 bs0 = let (w0, bs1) = bs32 bs0 in
            let (w1, bs2) = bs32 bs1 in
            (w64 w1 w0, bs2)
+
+bsvoid bs = ((), bs)
 
 at :: (ByteString -> (word, ByteString)) -> Int64 -> ByteString -> word
 at _ n bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
@@ -220,9 +222,11 @@ upby k n = map (+k) (zeroto n)
 
 byteOffsetOf (WordOffset o) = o * 8
 
+charOfBool b = if b then '1' else '0'
+
 readNthBit bs boff n =
   let (byteoff, bitoff) = (fromIntegral n) `divMod` 8 in
-  if readBitOfByte bitoff (boff + fromIntegral byteoff) bs then '1' else '0'
+  readBitOfByte bitoff (boff + fromIntegral byteoff) bs
 
 readBitOfByte :: Int64 -> Int64 -> ByteString -> Bool
 readBitOfByte bit byt bs =
@@ -237,7 +241,7 @@ derefListPointer ptr@(ListPtr bs origin off eltsize numelts) segs =
     LES_Byte1   -> StrFlat [chr $ fromIntegral $ byte bs (ByteOffset $ boff + n) | n <- zeroto numelts]
     --LES_Word    -> ListFlat [StructFlat [word bs (off + WordOffset n)]        [] | n <- zeroto numelts]
     LES_Word    -> ListFlat [StructFlat (sliceWords (unWordOffset off + n) 1 bs)        [] | n <- zeroto numelts]
-    --LES_Bit     -> StrFlat [readNthBit bs boff n | n <- zeroto numelts]
+    --LES_Bit     -> StrFlat [charOfBool (readNthBit bs boff n) | n <- zeroto numelts]
     LES_Bit     -> StrFlat $ "...bitlist(" ++ show numelts ++ ")..."
     LES_Composite dw pw ->
       let offsets = [off + (fromIntegral $ i * (dw + pw)) | i <- zeroto numelts] in
@@ -277,8 +281,14 @@ parseSegment bs segs =
   --unflatten 99999 segs $ derefStructPointer ptr segs
   unflatten 99999 segs $ readStructPointerAt 0 bs segs
 
+instance Pretty Word64 where pretty w = text (show w)
+
+mapL _ f (ListObj vals) = map f vals
+mapL _ _ (StructObj bs []) | BS.null bs = []
+mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other)
+
 main = do
-  rawbytes <- BS.readFile "testdata/schema.schema.bin"
+  rawbytes <- BS.readFile "testdata/addressbook.schema.bin"
   let segments@(seg:_) = splitSegments rawbytes
   let obj = parseSegment seg segments
   --putDoc $ pretty obj <> line
@@ -287,8 +297,6 @@ main = do
   mapM (\x -> putStrLn "" >> print x) $ cgrNodes $ mkCodeGeneratorRequest obj
   print $ "~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
   putDoc $ evalState (cgHS (mkCodeGeneratorRequest obj)) (CG_State (Map.empty))
-
-instance Pretty Word64 where pretty w = text (show w)
 
 ------------------------------------------------------------
 
@@ -308,33 +316,101 @@ instance CGHS CodeGeneratorRequest where
     ns <- mapM cgHS (cgrNodes cgr)
     -- Emit builders for each node.
     builders <- mapM emitNodeBuilder (cgrNodes cgr)
+
     return $ vsep $ ns ++ builders
 
-emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node)
+emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
-emitNodeUnionBuilder node@(NodeStruct {}) dname = do
-  let fnname = "mk" ++ dname
+emitNodeUnionBuilder NodeFile dname nodeid = do return $ text ""
+
+emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 = do
+  let fnname = "mk_struct_" ++ show nodeid
+  let fields = nodeStruct_fields node
+  fieldAccessors <- mapM emitGroupFieldAccessor fields
+  let discoffb = nodeStruct_discriminantOffset node * 2
+  return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
+        <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
+        <$> indent 4 (text ("case (at bs16 " ++ show discoffb ++ " bs) of"))
+        <$> indent 8 (vsep [text (show d) <+> text "->" <+> fieldAccessor | (d, fieldAccessor) <- zip (map fieldDiscriminant fields) fieldAccessors])
+        <$> text ""
+        <$> lineComment (text (show node))
+
+emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
+  let fnname = "mk_struct_" ++ show nodeid
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
-  return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
-        <$> text fnname <+> text "obj" <+> text " = do "
+  return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
+        <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (parens (text dname
-                               <+> hsep fieldAccessors))
+                               <+> indent 0 (vsep fieldAccessors)))
         <$> text ""
 
-emitNodeUnionBuilder other dname = do
+emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
+  let fnname = "mk_enum_" ++ show nodeid
+  return $  text fnname <+> text "::" <+> text "Word16 -> " <> text dname
+        <$> text fnname <+> text "w" <+> text "="
+        <$> indent 2 (text "case w of")
+        <$> indent 4 (vsep [text (show (enumerantOrder en)) <+> text "->" <+> text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
+                           | en <- nodeEnum_enumerants node])
+        <$> text ""
+
+emitNodeUnionBuilder other dname _ = do
   let fnname = "mk" ++ dname
   return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
-        <$> text fnname <+> text "obj" <+> text " = do "
+        <$> text fnname <+> text "obj" <+> text " = "
         <$> indent 4 (parens (text dname
                                <+> hsep []))
         <$> text ""
 
-emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
-  let offset = fromIntegral w * byteSizeOfType t
-  return $ text ("<"++show t ++"@("++show w++"*"++show (byteSizeOfType t)++")="++show offset++">")
+emitGroupFieldAccessor f = do
+  acc <- emitFieldAccessor f
+  return $ text (capitalizeFirstLetter $ legalizeIdent $ fieldName f) <+> acc
 
-emitFieldAccessor f = do
-  return $ text ("<non-slot>" ++ show f)
+emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
+  case kindOfType t of
+    KindPtr -> do
+      let offset = fromIntegral w 
+      --return $ text ("<"++show t ++"::"++show (kindOfType t)++"@("++show w++"*"++show (byteSizeOfType t)++")="++show offset++">")
+      return $ extractPtr t offset <+> text "{-" <+> text (show t) <+> text "-}"
+
+    KindData -> do
+      let offset = fromIntegral w * byteSizeOfType t
+      return $ extractData t offset <+> text "{-" <+> text (show t) <+> text "-}"
+
+emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
+  return $ parens $ text $ "mk_struct_" ++ show w ++ " obj"
+
+extractData :: Type_ -> Int -> Doc
+extractData t offset = 
+  let accessor = parens (text "at" <+> text (accessorNameForType t) <+> pretty offset <+> text "bs") in
+  case t of
+    Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
+    _           -> accessor
+
+extractPtrFunc :: Type_ -> Doc
+extractPtrFunc t =
+   case t of
+     Type_Text        -> text "unStrObj"
+     Type_Data        -> error "xPF Data"
+     Type_List      x -> error $ "xPF List of " ++ show x
+     Type_Struct    w -> text "mk_struct_" <> text (show w)
+     Type_Interface _ -> error "xPF Interface"
+     Type_Object      -> error "xPF Object"
+     _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+
+extractPtr :: Type_ -> Int -> Doc
+extractPtr t offset = 
+  let ptr = text "(ptrs !!" <+> text (show offset) <+> text ")" in
+  parens $
+    case t of
+     Type_Text        -> extractPtrFunc t <+> ptr
+     Type_Data        -> text "<unsupported extractPtr type:" <+> text (show t)
+     Type_List      x -> text "mapL \"xP\"" <+> extractPtrFunc x <+> ptr
+     Type_Struct    _ -> extractPtrFunc t <+> ptr
+     Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
+     Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
+     _ -> error $ "extractPtr saw unexpected type " ++ show t
 
 spanList _ [] = ([],[])
 spanList func list@(x:xs) =
@@ -369,10 +445,13 @@ denoteNodeId node = do
 instance CGHS Node where
   cgHS node = do
     nu <- cgHS (nodeUnion node)
-    return $
-      text "data" <+> text (nodeDisplayName node) <+> text "=" <+> text "{" <+> text "--" <+> pretty (nodeId node)
-        <$> nu
-        <$> text "}"
+    let isStruct = case nodeUnion node of
+                      NodeStruct {} -> True
+                      _             -> False
+    let mb_name = text $ if isStruct then nodeDisplayName node else ""
+    return $ formatDataDecl (nodeDisplayName node) (nodeId node) [(mb_name, nu)]
+
+lineComment doc = text "--" <+> doc
 
 instance CGHS NodeUnion where
   cgHS (NodeFile) = return $ text " -- <NodeFile>"
@@ -380,27 +459,43 @@ instance CGHS NodeUnion where
   cgHS (NodeInterface _) = return $ text "NodeInterface"
   cgHS (NodeEnum enums) = do
     es <- mapM cgHS enums
-    return $ cases es
+    return $ indent 8 (cases es)
   cgHS ns@(NodeStruct {}) = do
-    fs <- mapM cgHS (nodeStruct_fields ns)
-    return $ embedded fs
+    let isGroup = nodeStruct_isGroup ns /= 0
+    fs <- mapM (cgHS_Field isGroup) (nodeStruct_fields ns)
+    if isGroup
+      then return $ indent 8 (cases    fs)
+      else return $ indent 8 (embedded fs)
   cgHS ns@(NodeAnnotation {}) = do
     return $ text (show ns)
 
 instance CGHS Enumerant where
   cgHS e =
-    return $ text (enumerantName e)
+    return $ text (capitalizeFirstLetter $ legalizeIdent $ enumerantName e)
 
-instance CGHS Field where
-  cgHS f = do
+capitalizeFirstLetter [] = []
+capitalizeFirstLetter (h:t) = toUpper h : t
+
+legalizeIdent "type" = "type_"
+legalizeIdent str = str
+
+cgHS_Field True f = do
+    ty <- case fieldUnion f of
+            FieldSlot _ t _ -> cgHS t
+            FieldGroup _    -> return $ text "<...FieldGroup(1)...>"
+    return $ text (capitalizeFirstLetter $ legalizeIdent $ fieldName f) <+> ty
+
+cgHS_Field False f = do
     fu <- cgHS $ fieldUnion f
-    return $ text (fieldName f) <+> fu
+    return $ text (legalizeIdent $ fieldName f) <+> fu
 
 instance CGHS FieldUnion where
   cgHS (FieldSlot _ t _) = do
      tx <- cgHS t
      return $ text "::" <+> tx
-  cgHS (FieldGroup _) = return $ text "<...FieldGroup...>"
+  cgHS (FieldGroup w) = do
+     tx <- liftM text (lookupId w)
+     return $ text "::" <+> tx
 
 instance CGHS Type_ where
   cgHS type_ =
@@ -426,11 +521,17 @@ instance CGHS Type_ where
       Type_Interface w -> liftM text (lookupId w)
       Type_Object      -> return $ text "<...object...>"
 
+formatDataDecl name nodeid [(arm_name, nu)] =
+      lineComment (pretty nodeid)
+  <$> text "data" <+> text name <+> text "=" <+> arm_name <+> text "{"
+        <$> nu
+        <$> text "} deriving Show"
+
 cases :: [Doc] -> Doc
 cases (doc:docs) = vsep $ (text " " <+> doc) : (map (\d -> text "|" <+> d) docs)
 
 embedded :: [Doc] -> Doc
-embedded docs = vsep $ map (\d -> text ";" <+> d) docs
+embedded docs = vsep $ map (\(d,p) -> text p <+> d) (zip docs (" ":repeat ","))
 
 denoteId :: Word64 -> String -> CG ()
 denoteId w s = do
@@ -498,7 +599,6 @@ data NodeUnion =
 
 data Field = Field {
       fieldName :: String
---  , fieldSlot :: ()
     , fieldCodeOrder :: Word16
     , fieldDiscriminant :: Word16
     , fieldUnion :: FieldUnion
@@ -575,10 +675,30 @@ data Value =
    | Value_ERROR
    deriving Show
 
+data Kind = KindData | KindPtr deriving Show
 
-mapL _ f (ListObj vals) = map f vals
-mapL _ _ (StructObj bs []) | BS.null bs = []
-mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other)
+kindOfType t = case t of
+     Type_Void        -> KindData
+     Type_Bool        -> KindData
+     Type_Int8        -> KindData
+     Type_Int16       -> KindData
+     Type_Int32       -> KindData
+     Type_Int64       -> KindData
+     Type_UInt8       -> KindData
+     Type_UInt16      -> KindData
+     Type_UInt32      -> KindData
+     Type_UInt64      -> KindData
+     Type_Float32     -> KindData
+     Type_Float64     -> KindData
+     Type_Text        -> KindPtr
+     Type_Data        -> KindPtr
+     Type_List      _ -> KindPtr
+     Type_Enum      _ -> KindData
+     Type_Struct    _ -> KindPtr
+     Type_Interface _ -> KindPtr
+     Type_Object      -> KindPtr
+
+--------------------------------------------------------------------
 
 mkCodeGeneratorRequest :: Object -> CodeGeneratorRequest
 mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles]) =
@@ -611,6 +731,19 @@ mkNode          (StructObj bs
                         3 -> NodeInterface (mapL "NodeI" mkMethod (rest !! 0))
                         4 -> NodeConst (error "NodeConstType") (error "NodeConstValue")-- (rest !! 0) (rest !! 1)
                         5 -> NodeAnnotation (mkType $ rest !! 0)
+                                            (readNthBit bs 14 0)
+                                            (readNthBit bs 14 1)
+                                            (readNthBit bs 14 2)
+                                            (readNthBit bs 14 3)
+                                            (readNthBit bs 14 4)
+                                            (readNthBit bs 14 5)
+                                            (readNthBit bs 14 6)
+                                            (readNthBit bs 14 7)
+                                            (readNthBit bs 14 8)
+                                            (readNthBit bs 14 9)
+                                            (readNthBit bs 14 10)
+                                            (readNthBit bs 14 11)
+                        {-
                                             (((at bs8 14 bs) .&. 1) /= 0)
                                             (((at bs8 14 bs) .&. 2) /= 0)
                                             (((at bs8 14 bs) .&. 4) /= 0)
@@ -623,6 +756,7 @@ mkNode          (StructObj bs
                                             (((at bs8 15 bs) .&. 2) /= 0)
                                             (((at bs8 15 bs) .&. 4) /= 0)
                                             (((at bs8 15 bs) .&. 8) /= 0)
+                                            -}
                         v -> error $ "Unknown Node discriminant:" ++ show v
 
 mkField  (StructObj bs (StrObj name:annotations:rest)) =
@@ -700,7 +834,9 @@ mkNestedNode (StructObj bs [name]) = NestedNode (unStrObj name) (at bs64 0 bs)
 mkEnumerant (StructObj bs (StrObj name:rest)) =
   Enumerant name (at bs16 0 bs)
 
+--------------------------------------------------------------------
 
+byteSizeOfType :: Type_ -> Int
 byteSizeOfType type_ =
     case type_ of
       Type_Void        -> 0
@@ -722,3 +858,27 @@ byteSizeOfType type_ =
       Type_Struct    _ -> 8
       Type_Interface _ -> 8
       Type_Object      -> 8
+
+accessorNameForType :: Type_ -> String
+accessorNameForType type_ =
+    case type_ of
+      Type_Void        -> "bsvoid"
+      Type_Bool        -> error $ "no accessor yet for " ++ show type_
+      Type_Int8        -> "bs8i"
+      Type_Int16       -> "bs16i"
+      Type_Int32       -> "bs32i"
+      Type_Int64       -> "bs64i"
+      Type_UInt8       -> "bs8"
+      Type_UInt16      -> "bs16"
+      Type_UInt32      -> "bs32"
+      Type_UInt64      -> "bs64"
+      Type_Float32     -> error $ "no accessor yet for " ++ show type_
+      Type_Float64     -> error $ "no accessor yet for " ++ show type_
+      Type_Text        -> error $ "no accessor yet for " ++ show type_
+      Type_Data        -> error $ "no accessor yet for " ++ show type_
+      Type_List      _ -> error $ "no accessor yet for " ++ show type_
+      Type_Enum      _ -> "bs16"
+      Type_Struct    _ -> error $ "no accessor yet for " ++ show type_
+      Type_Interface _ -> error $ "no accessor yet for " ++ show type_
+      Type_Object      -> error $ "no accessor yet for " ++ show type_
+
