@@ -27,15 +27,18 @@ def main():
         n = n + 1
 
         m = re.match(r".(\d{7}) ((?: [0-9a-f]{2})+)", line)
-        offset_bytes = int(m.group(1), 16)
-        offset_words = offset_bytes / 8
+        try:
+          offset_bytes = int(m.group(1), 16)
+          offset_words = offset_bytes / 8
 
-        bytes = m.group(2).strip().split(' ')
+          bytes = m.group(2).strip().split(' ')
 
-        if n == 1:
-            print line,
-        else:
-            print line.rstrip(), interpretations_of(offset_words, bytes)
+          if n == 1:
+              print line,
+          else:
+              print line.rstrip(), interpretations_of(offset_words, bytes)
+        except:
+          print line,
 
 dataof = {}
 ptrsof = {}

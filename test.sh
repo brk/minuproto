@@ -22,7 +22,7 @@ hexdump  -e '"%07.7_ax  "  8/1 "%02x " "\n"' ${M2} > ${M2}.hex.txt
 
 # Note the "reversed" order here, which makes it so that
 # our (presumably wrong) file is the color red, indicating brokenness.
-diff -U 100 ${M2}.hex.txt ${M1}.hex.txt | python explain-capnproto-bytes.py | colordiff | ./third_party/diff-highlight
+diff -s -U 100 ${M2}.hex.txt ${M1}.hex.txt | python explain-capnproto-bytes.py | colordiff | ./third_party/diff-highlight
 
 
 
