@@ -115,14 +115,16 @@ match var arms =
 doblock stmts = text "do" <$> indent 2 (vcat stmts)
 
 srCall strs = txCall (map text strs)
-txCall txts = parens (foldl1 (<+>) (         txts))
+txCall (callee:txts) = group $ parens (callee <+> align (vsep txts))
+atomCall (callee:txts) = parens (hsep (callee:txts))
 
 multiLineComment doc = vsep [text "{-", doc, text "-}"]
+atomicComment doc = text "{-" <+> doc <+> text "-}"
 lineComment doc = text "--" <+> doc
 
-emitListIndex nm off = srCall ["(!!)", nm, show off]
+emitListIndex nm off = atomCall $ map text ["(!!)", nm, show off]
 
-emitAdd s1 s2 = srCall [s1, "+", s2]
+emitAdd s1 s2 = group $ srCall [s1, "+", s2]
 
 fnDefinition name args argtypes retty body =
   let defn = name <+> hsep args <+> text "=" <+> body <$> text "" in
@@ -179,8 +181,8 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                      (doblock [text "let nextoffset = data_off +" <+> text (show (8 * size))
                               ,txCall (splitArgs $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
-                                            show (txCall [text "delta_in_words", text "data_off",
-                                                           emitAdd "ptr_off" "8"])]])
+                                            show (atomCall [text "delta_in_words", text "data_off",
+                                                            emitAdd "ptr_off" "8"])]])
     <$> lineComment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
     <$> fnDefinition (text (helperForStructSerializer nodeid))
                      (splitArgs "obj rab data_off nextoffset") noArgTys noRetTy
@@ -279,7 +281,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
   let args = [text "obj"]
   return $  fnDefinition (text $ "mk" ++ dname) args noArgTys noRetTy (txCall [fnname, text "obj"])
         <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy dname)
-                         (match (show (srCall ["at", "bs16", show discoffb, "bs"]))
+                         (match (show (extractData Type_UInt16 discoffb))
                             [(text (show d), fieldAccessor)
                             | (d, fieldAccessor) <- zip (map fieldDiscriminant discriminatedFields) fieldAccessors])
 
@@ -312,21 +314,21 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
       let offset = fromIntegral w
-      return $ extractPtr t offset <+> multiLineComment (text (show t))
+      return $ extractPtr t offset <+> atomicComment (text (show t))
 
     KindData -> do
       let offset = fromIntegral w * byteSizeOfType t
-      return $ extractData t offset <+> multiLineComment (text (show t))
+      return $ extractData t offset <+> atomicComment (text (show t))
 
 emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
   return $ txCall [makerForType (Type_Struct w), text "obj"]
 
-extractData :: Type_ -> Int -> Doc
+extractData :: Pretty num => Type_ -> num -> Doc
 extractData t offset =
-  let accessor = srCall ["at", accessorNameForType t, show offset, "bs"] in
+  let accessor = atomCall [text "at", text (accessorNameForType t), pretty offset, text "bs"] in
   case t of
-    Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
-    Type_Enum w -> txCall [makerForType t, accessor]
+    Type_Bool   -> atomCall [text (accessorNameForType t), pretty offset, text "bs"]
+    Type_Enum w -> atomCall [makerForType t, accessor]
     _           -> accessor
 
 extractPtrFunc :: Type_ -> Doc
