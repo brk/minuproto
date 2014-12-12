@@ -1,4 +1,20 @@
-module Minuproto where
+module Minuproto (
+                  -- Generic helpers, used by both generated code
+                  -- and by the Main.hs bootstrapping
+                  at, bs1b, bs8, bs16, bs32, bs64, mapL, unStrObj, Object(..),
+
+                  -- Helpers for bootstrapping, not used by generated code.
+                  splitSegments, parseSegment, readNthBit,
+
+                  -- Helpers for generated code, not used by bootstrapping
+                  parseBytes, serializeWith, delta_in_words, updateNextOffset,
+                  bsvoid, mk_void, sr_Type_Void,
+                  sr_Type_UInt64, sr_Type_UInt32, sr_Type_UInt16, sr_Type_UInt8, sr_Type_Bool,
+                  sr_Type_Int64,  sr_Type_Int32,  sr_Type_Int16,  sr_Type_Int8,
+                  sr_Type_Text, objsLength, sr_total_size_for,
+                  sr_ptr_list, sr_ptr_struct, sr_composite_list_helper,
+                  sr_list_of_Type_Void
+                  ) where
 
 import Data.Int
 import Data.Bits
@@ -112,10 +128,7 @@ splitSegments rawbytes =
   let startsegpos = 4 * (fromIntegral numsegs + (if isOdd numsegs then 0 else 1)) in
   let allsegbytes = BS.drop startsegpos rawbytes in
   let segoffsets = scanl (+) 0 segsizes in
-  let segs = [sliceWords offset len allsegbytes | (offset, len) <- zip segoffsets segsizes] in
-  trace (show segsizes ++ " ;; " ++ show (BS.length rawbytes) ++ " vs " ++ show (zip segoffsets segsizes) ++ " ;; " ++ show (map BS.length segs)) $
-    segs
-
+  [sliceWords offset len allsegbytes | (offset, len) <- zip segoffsets segsizes]
 
 data Pointer = StructPtr ByteString String WordOffset Word64      Word64 -- PointsInto, Origin, Offset, # data words, # ptr words
              | ListPtr   ByteString WordOffset WordOffset ListEltSize Word64 -- PointsInto, Origin, Offset, eltsize, # elts
@@ -335,6 +348,8 @@ sr_Type_Bool rab b data_off bit_off = do
 
 padbyte_offsets o n = [o.. o + n]
 
+debugStr s = if False then putStrLn s else return ()
+
 sr_Type_Text :: String -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
 sr_Type_Text str rab ptr_off data_off = do
     o <- foldM (\o c -> do rabWriteWord8 rab o (BS.c2w c)
@@ -342,20 +357,20 @@ sr_Type_Text str rab ptr_off data_off = do
     let num_elts = length str + 1
     let num_pad_bytes = let excess = num_elts `mod` 8 in
                          if excess > 0 then 8 - excess else 0
-    putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes))
-    putStrLn $ "text ptr is at " ++ show ptr_off ++ " and text data is at " ++ show data_off
+    debugStr $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes))
+    debugStr $ "text ptr is at " ++ show ptr_off ++ " and text data is at " ++ show data_off
     bp <- rabSize rab
-    putStrLn $ "before padding, nextoffset will be " ++ show bp
+    debugStr $ "before padding, nextoffset will be " ++ show bp
     -- always writes at least one byte for nul terminator.
     mapM_ (\o -> do rabWriteWord8 rab o 0x00) (padbyte_offsets o (fromIntegral num_pad_bytes))
     bp <- rabSize rab
-    putStrLn $ "after padding, nextoffset will be " ++ show bp
+    debugStr $ "after padding, nextoffset will be " ++ show bp
     sr_ptr_list rab ptr_off 2 (fromIntegral num_elts) (delta_in_words data_off (ptr_off + 8))
 
 sr_ptr_list :: ResizableArrayBuilder -> Word64 -> Int -> Word64 -> Word64 -> IO ()
 sr_ptr_list rab ptr_off size_tag num_elts delta = do
   let a_tag = 1
-  putStrLn $ "emitting list ptr @ " ++ show ptr_off ++ " with tag/nelts/delta = " ++ show (size_tag, num_elts, delta) ++ " ; " ++ show ((fromIntegral size_tag + fromIntegral num_elts `shiftL` 3) :: Word32)
+  debugStr $ "emitting list ptr @ " ++ show ptr_off ++ " with tag/nelts/delta = " ++ show (size_tag, num_elts, delta) ++ " ; " ++ show ((fromIntegral size_tag + fromIntegral num_elts `shiftL` 3) :: Word32)
   rabWriteWord32 rab  ptr_off      (a_tag + fromIntegral delta `shiftL` 2)
   rabWriteWord32 rab (ptr_off + 4) (fromIntegral size_tag + fromIntegral num_elts `shiftL` 3)
 
