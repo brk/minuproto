@@ -222,8 +222,10 @@ emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
         <$> text ""
 
 emitNodeUnionSerializer node dname nodeid = do
-  return $ vsep [text "{-", string (show (dname, nodeid, node)), text "-}"]
+  return $ multiLineComment $ string (show (dname, nodeid, node))
 -----
+
+multiLineComment doc = vsep [text "{-", doc, text "-}"]
 
 emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
@@ -275,11 +277,11 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
       let offset = fromIntegral w
-      return $ extractPtr t offset <+> text "{-" <+> text (show t) <+> text "-}"
+      return $ extractPtr t offset <+> multiLineComment (text (show t))
 
     KindData -> do
       let offset = fromIntegral w * byteSizeOfType t
-      return $ extractData t offset <+> text "{-" <+> text (show t) <+> text "-}"
+      return $ extractData t offset <+> multiLineComment (text (show t))
 
 emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
   return $ parens $ text $ "mk_struct_" ++ show w ++ " obj"
@@ -358,7 +360,8 @@ denoteNodeId node = do
 instance CGHS Node where
   cgHS node = do
     arms <- computeDataArms (nodeDisplayName node) (nodeUnion node)
-    return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms <$> text "{-" <$> string (show node) <$> text "-}"
+    return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms
+          <$> multiLineComment (string (show node))
 
 lineComment doc = text "--" <+> doc
 
@@ -571,7 +574,7 @@ data Field = Field {
       fieldName_ :: String
     , fieldCodeOrder :: Word16
     , fieldDiscriminant :: Word16
-    , fieldUnion :: FieldUnion
+    , fieldUnion   :: FieldUnion
     , fieldOrdinal :: FieldOrdinal
 } deriving Show
 
