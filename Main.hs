@@ -25,15 +25,12 @@ import Control.Monad.State
 import System.IO(withFile, IOMode(WriteMode))
 
 main = do
-  rawbytes <- BS.readFile "testdata/addressbook.schema.bin"
+  rawbytes <- BS.readFile "testdata/test2.schema.bin"
   let segments@(seg:_) = splitSegments rawbytes
   let obj = parseSegment seg segments
   --putDoc $ pretty obj <> line
   putStrLn $ "had this many segments: " ++ show (length segments)
   let cgr = mkCodeGeneratorRequest obj
-  print $ cgr
-  mapM (\x -> putStrLn "" >> print x) $ cgrNodes $ cgr
-  print $ "~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
   let hs_code_doc = evalState (cgHS cgr) (CG_State Map.empty Map.empty)
   putDoc $ hs_code_doc
   modularizeAndPutDocToFile hs_code_doc (rfName ((cgrRequestedFiles cgr) !! 0))
@@ -103,32 +100,36 @@ srCall strs = parens (foldl1 (<+>) (map text strs))
 txCall strs = parens (foldl1 (<+>) (         strs))
 pair a b = parens (a <> text ", " <> b)
 
-emitFieldSerializer getNameOf f | (FieldSlot w t _) <- fieldUnion f =
+getFieldAccessor f =
+  if fieldDiscriminant f /= 0xffff
+    then fieldUnCtorName f
+    else fieldName f
+
+emitFieldSerializer f | (FieldSlot w t _) <- fieldUnion f =
   let offsetInBytes = fromIntegral w * byteSizeOfType t in
   (case kindOfType t of
     KindPtr ->
-      txCall [serializerForType t, srCall [getNameOf f, "obj"], text "rab", parens (text "ptrs_off +" <+> text (show offsetInBytes)), text "nextoffset"]
-      <$> text "nextoffset <- rabSize rab >>= return . fromIntegral ; return ()"
+      txCall [serializerForType t, srCall [getFieldAccessor f, "obj"], text "rab", parens (text "ptrs_off +" <+> text (show offsetInBytes)), text "nextoffset"]
+      <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
     KindData ->
-      txCall [serializerForType t, text "rab", srCall [getNameOf f, "obj"], parens (text ("data_off + " ++ show offsetInBytes))]
+      txCall [serializerForType t, text "rab", srCall [getFieldAccessor f, "obj"], parens (text ("data_off + " ++ show offsetInBytes))]
     ) <+> lineComment (text $ "serialize field '" ++ fieldName_ f ++ "'")
 
-emitFieldSerializer getNameOf f | (FieldGroup w) <- fieldUnion f =
-  txCall [text ("sr_group_" ++ (show w)), text "rab", srCall [getNameOf f, "obj"], text "nextoffset", text "data_off", text "ptrs_off"]
+emitFieldSerializer f | (FieldGroup w) <- fieldUnion f =
+  txCall [text ("sr_group_" ++ (show w)), text "rab", srCall [getFieldAccessor f, "obj"], text "nextoffset", text "data_off", text "ptrs_off"]
     <+> lineComment (text $ "serialize group '" ++ fieldName_ f ++ "'")
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node == 0 = do
-  let (datafields, ptrfields) = splitFields $ nodeStruct_fields node
   let sizedata = nodeStruct_dataWordCount node
   let size    =  nodeStruct_pointerCount node + sizedata
   -- data fields first, then pointer fields
   return $
         text ("sr" ++ dname ++ " :: " ++ dname ++ " -> IO ByteString")
-    <$> text ("sr" ++ dname ++ " obj = serializeWith obj sr_struct_" ++ show nodeid) 
+    <$> text ("sr" ++ dname ++ " obj = serializeWith obj sr_struct_" ++ show nodeid)
     <$> text ""
     <$> text ("sr_struct_" ++ show nodeid ++ " :: " ++ dname ++ " -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
-    <$> text ("sr_struct_" ++ show nodeid ++ " obj rab ptr_off data_off = do") 
-    <$> indent 4 ( 
+    <$> text ("sr_struct_" ++ show nodeid ++ " obj rab ptr_off data_off = do")
+    <$> indent 4 (
                        text "let nextoffset = data_off +" <+> text (show (8 * size))
                    <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset")
                    <$> srCall ["sr_ptr_struct rab ptr_off", show sizedata, show (size - sizedata),
@@ -136,13 +137,24 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                  )
     <$> text ""
     <$> lineComment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
-    <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset = do") 
+    <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset = do")
     <$> indent 4 (     text "let ptrs_off = data_off +" <+> text (show (8 * sizedata))
-                   <$> vsep (map (emitFieldSerializer fieldName) (nodeStruct_fields node))
+                   <$> if nodeStruct_discriminantCount node == 0
+                        then vsep (map emitFieldSerializer (nodeStruct_fields node))
+                        else 
+                             let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff] in
+                             let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff] in
+                             text ("let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
+                         <$> text "case obj of"
+                         <$> indent 4 (vsep [text (fieldCtorName f) <+> text "{}" <+> text "->"
+                                                <+> (text "do" <$> indent 2 (vsep [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
+                                                                                  ,emitFieldSerializer f])
+                                                               <$> indent 2 (vsep (map emitFieldSerializer indiscriminantFields)))
+                                              | f <- discriminatedFields])
                 )
     <$> text ""
     <$> text ("sr_list_of_" ++ show nodeid ++ " :: [" ++ dname ++ "] -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
-    <$> text ("sr_list_of_" ++ show nodeid ++ " objs rab ptr_off data_off = do") 
+    <$> text ("sr_list_of_" ++ show nodeid ++ " objs rab ptr_off data_off = do")
     <$> indent 4 (
            case nodeStruct_preferredListEncoding node of
              7 ->
@@ -157,21 +169,33 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
              siz ->
                        --text ("let objsize = " ++ show ((byteSizeOfListEncoding siz) * 8) ++ " :: Word64")
                        text  "-- TODO test this..."
+                   <$> text  "let objsize = " <> text (show (byteSizeOfListEncoding siz))
                    <$> text  "let num_elts = fromIntegral $ length objs"
-                   <$> text  "let totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num elts"]
-                   <$> text ("sr_composite_list_helper rab data_off (data_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
+                   <$> text  "let totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"]
+                   <$> text ("sr_composite_list_helper rab objsize data_off (data_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
                    <$> text "sr_ptr_list rab ptr_off " <> pretty (show siz) <> text " num_elts (delta_in_words data_off (ptr_off + 8))"
                   )
     <$> text ""
 
+emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node == 0 = do
+  let sizedata = nodeStruct_dataWordCount node
+  let size    =  nodeStruct_pointerCount node + sizedata
+  return $ text ""
+    <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do")
+    <$> indent 4 (
+                       text "let nextoffset = data_off +" <+> text (show (8 * size))
+                   <$> vsep (map emitFieldSerializer (nodeStruct_fields node))
+                 )
+    <$> text ""
+
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
   return $ text ""
-    <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do") 
+    <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do")
     <$> indent 4 (text $ "let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
     <$> indent 4 (text "case obj of")
     <$> indent 6 (vsep [text (fieldCtorName f) <+> text "{}" <+> text "->"
                           <+> (text "do" <$> indent 2 (vsep [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                                            ,emitFieldSerializer fieldUnCtorName f]))
+                                                            ,emitFieldSerializer f]))
                         | f <- nodeStruct_fields node])
     <$> text ""
 
@@ -186,20 +210,23 @@ emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
         <$> indent 2 (text "rabWriteWord16 rab offset value")
         <$> text ""
 
+emitNodeUnionSerializer node dname nodeid = do
+  return $ vsep [text "{-", string (show (dname, nodeid, node)), text "-}"]
 -----
 
 emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
-emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 = do
+emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminantCount node /= 0 = do
   let fnname = "mk_struct_" ++ show nodeid
-  let fields = nodeStruct_fields node
-  fieldAccessors <- mapM emitGroupFieldAccessor fields
+  let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff]
+  let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff]
+  fieldAccessors <- mapM (emitGroupFieldAccessor indiscriminantFields) discriminatedFields
   let discoffb = nodeStruct_discriminantOffset node * 2
   return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
         <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
         <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (text ("case (at bs16 " ++ show discoffb ++ " bs) of"))
-        <$> indent 8 (vsep [text (show d) <+> text "->" <+> fieldAccessor | (d, fieldAccessor) <- zip (map fieldDiscriminant fields) fieldAccessors])
+        <$> indent 8 (vsep [text (show d) <+> text "->" <+> fieldAccessor | (d, fieldAccessor) <- zip (map fieldDiscriminant discriminatedFields) fieldAccessors])
         <$> text ""
 
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
@@ -229,14 +256,14 @@ emitNodeUnionBuilder other dname _ = do
                                <+> hsep []))
         <$> text ""
 
-emitGroupFieldAccessor f = do
-  acc <- emitFieldAccessor f
-  return $ text (capitalizeFirstLetter $ legalizeIdent $ fieldName f) <+> acc
+emitGroupFieldAccessor commonFields f = do
+  accs <- mapM emitFieldAccessor (commonFields ++ [f])
+  return $ txCall ((text (fieldCtorName f)) : accs)
 
 emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
-      let offset = fromIntegral w 
+      let offset = fromIntegral w
       return $ extractPtr t offset <+> text "{-" <+> text (show t) <+> text "-}"
 
     KindData -> do
@@ -247,9 +274,10 @@ emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
   return $ parens $ text $ "mk_struct_" ++ show w ++ " obj"
 
 extractData :: Type_ -> Int -> Doc
-extractData t offset = 
-  let accessor = parens (text "at" <+> text (accessorNameForType t) <+> pretty offset <+> text "bs") in
+extractData t offset =
+  let accessor = srCall ["at", accessorNameForType t, show offset, "bs"] in
   case t of
+    Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
     _           -> accessor
 
@@ -262,10 +290,11 @@ extractPtrFunc t =
      Type_Struct    w -> text "mk_struct_" <> text (show w)
      Type_Interface _ -> error "xPF Interface"
      Type_Object      -> error "xPF Object"
+     Type_Void        -> text "mk_void"
      _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
 
 extractPtr :: Type_ -> Int -> Doc
-extractPtr t offset = 
+extractPtr t offset =
   let ptr = text "(ptrs !!" <+> text (show offset) <+> text ")" in
   parens $
     case t of
@@ -291,12 +320,12 @@ split :: Eq a => [a] -> [a] -> [[a]]
 split _ [] = []
 split delim str =
     let (firstline, remainder) = breakList (isPrefixOf delim) str
-        in 
+        in
         firstline : case remainder of
                                    [] -> []
                                    x -> if x == delim
                                         then [] : []
-                                        else split delim 
+                                        else split delim
                                                  (drop (length delim) x)
 sjoin delim s = concat (intersperse delim s)
 replace old new s = sjoin new . split old $ s
@@ -318,7 +347,7 @@ denoteNodeId node = do
 instance CGHS Node where
   cgHS node = do
     arms <- computeDataArms (nodeDisplayName node) (nodeUnion node)
-    return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms
+    return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms <$> text "{-" <$> string (show node) <$> text "-}"
 
 lineComment doc = text "--" <+> doc
 
@@ -329,14 +358,20 @@ computeDataArms _  (NodeInterface _) = error $ "computeDataArms NodeInterface"
 computeDataArms _  (NodeEnum enums) = return $ map armCaseOfEnum enums
 computeDataArms _  na@(NodeAnnotation {}) = do return []
 computeDataArms nm ns@(NodeStruct {}) = do
-    let isGroup = nodeStruct_isGroup ns /= 0
-    if isGroup
+    if nodeStruct_discriminantCount ns /= 0
       then do
-        arms <- mapM caseArmOfFieldGG (nodeStruct_fields ns)
-        return arms
+        let indiscriminantFields =    [f | f <- nodeStruct_fields ns, fieldDiscriminant f == 0xffff]
+        arms <- mapM caseArmOfFieldGG [f | f <- nodeStruct_fields ns, fieldDiscriminant f /= 0xffff]
+        prependFields indiscriminantFields arms
       else do
         fields <- mapM caseArmOfFieldNG (nodeStruct_fields ns)
         return [(text nm, fields)]
+
+prependFields fields arms = do
+  let doPrependFields (ctor, params) = do
+         fieldparams <- mapM caseArmOfFieldNG fields
+         return (ctor, fieldparams ++ params)
+  mapM doPrependFields arms
 
 armCaseOfEnum :: Enumerant -> (Doc, [Doc])
 armCaseOfEnum e = (armNameOfEnum e, [])
@@ -344,9 +379,7 @@ armCaseOfEnum e = (armNameOfEnum e, [])
 armNameOfEnum e = text (capitalizeFirstLetter $ legalizeIdent $ enumerantName e)
 
 caseArmOfFieldGG f = do
-    ty <- case fieldUnion f of
-            FieldSlot _ t _ -> cgHS t
-            FieldGroup _    -> return $ text "<...FieldGroup(1)...>"
+    ty <- cgHS (fieldUnion f)
     return $ (text (fieldCtorName f), [text (fieldUnCtorName f) <+> text "::" <+> ty])
 
 caseArmOfFieldNG f = do
@@ -371,18 +404,18 @@ instance CGHS FieldUnion where
 instance CGHS Type_ where
   cgHS type_ =
     case type_ of
-      Type_Void        -> return $ text "()" 
+      Type_Void        -> return $ text "()"
       Type_Bool        -> return $ text "Bool"
       Type_Int8        -> return $ text "Int8"
       Type_Int16       -> return $ text "Int16"
       Type_Int32       -> return $ text "Int32"
-      Type_Int64       -> return $ text "Int64" 
+      Type_Int64       -> return $ text "Int64"
       Type_UInt8       -> return $ text "Word8"
       Type_UInt16      -> return $ text "Word16"
       Type_UInt32      -> return $ text "Word32"
       Type_UInt64      -> return $ text "Word64"
       Type_Float32     -> return $ text "Float"
-      Type_Float64     -> return $ text "Double" 
+      Type_Float64     -> return $ text "Double"
       Type_Text        -> return $ text "String"
       Type_Data        -> return $ text "ByteString"
       Type_List      t -> do tx <- cgHS t
@@ -539,7 +572,7 @@ data FieldUnion =
   deriving Show
 
 data FieldOrdinal =
-     FieldOrdinalImplicit 
+     FieldOrdinalImplicit
    | FieldOrdinalExplicit Word16
   deriving Show
 
@@ -777,7 +810,7 @@ accessorNameForType :: Type_ -> String
 accessorNameForType type_ =
     case type_ of
       Type_Void        -> "bsvoid"
-      Type_Bool        -> error $ "no accessor yet for " ++ show type_
+      Type_Bool        -> "bs1b"
       Type_Int8        -> "bs8i"
       Type_Int16       -> "bs16i"
       Type_Int32       -> "bs32i"

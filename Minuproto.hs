@@ -25,14 +25,14 @@ import Control.Monad.State
 wordLE n a b = let cast = fromInteger . toInteger in
                shift (cast a) n .|. cast b
 
-w16 :: Word8 -> Word8 -> Word16
-w16 a b = wordLE 8 a b
+_w16 :: Word8 -> Word8 -> Word16
+_w16 a b = wordLE 8 a b
 
-w32 :: Word16 -> Word16 -> Word32
-w32 a b = wordLE 16 a b
+_w32 :: Word16 -> Word16 -> Word32
+_w32 a b = wordLE 16 a b
 
-w64 :: Word32 -> Word32 -> Word64
-w64 a b = wordLE 32 a b
+_w64 :: Word32 -> Word32 -> Word64
+_w64 a b = wordLE 32 a b
 
 bs8 :: ByteString -> (Word8, ByteString)
 bs8 bs = case BS.uncons bs of
@@ -42,23 +42,29 @@ bs8 bs = case BS.uncons bs of
 bs16 :: ByteString -> (Word16, ByteString)
 bs16 bs0 = let (w0, bs1) = bs8 bs0 in
            let (w1, bs2) = bs8 bs1 in
-           (w16 w1 w0, bs2)
+           (_w16 w1 w0, bs2)
 
 bs32 :: ByteString -> (Word32, ByteString)
 bs32 bs0 = let (w0, bs1) = bs16 bs0 in
            let (w1, bs2) = bs16 bs1 in
-           (w32 w1 w0, bs2)
+           (_w32 w1 w0, bs2)
 
 bs64 :: ByteString -> (Word64, ByteString)
 bs64 bs0 = let (w0, bs1) = bs32 bs0 in
            let (w1, bs2) = bs32 bs1 in
-           (w64 w1 w0, bs2)
+           (_w64 w1 w0, bs2)
 
 bsvoid bs = ((), bs)
 
 at :: (ByteString -> (word, ByteString)) -> Int64 -> ByteString -> word
 at _ n bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
 at f n bs = let (v, _) = f (BS.drop (fromIntegral n) bs) in v
+
+bs1b :: Int64 -> ByteString -> Bool
+bs1b offset bs =
+  let (byteoffset, bitoffset) = offset `divMod` 8 in
+  let (v, _) = bs8 (BS.drop (fromIntegral byteoffset) bs) in
+  testBit v (fromIntegral bitoffset)
 
 isOdd n = (n `mod` 2) == 0
 
@@ -133,6 +139,9 @@ dropLastByte str = take (length str - 1) str
 unStrObj (StrObj str) = dropLastByte str
 unStrObj (StructObj bs []) | BS.null bs = ""
 unStrObj other = error $ "unStrObj wasn't expecting " ++ show other
+
+mk_void :: Object -> ()
+mk_void _ = ()
 
 instance Pretty Object where
   pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"
@@ -243,7 +252,7 @@ derefListPointer ptr@(ListPtr bs origin off eltsize numelts) segs =
   case eltsize of
     LES_Phantom -> ListFlat (replicate (fromIntegral numelts) (StructFlat BS.empty []))
     LES_Byte1   -> StrFlat [chr $ fromIntegral $ byte bs (ByteOffset $ boff + n) | n <- zeroto numelts]
-    --LES_Word    -> ListFlat [StructFlat [word bs (off + WordOffset n)]        [] | n <- zeroto numelts]
+    LES_Byte2   -> ListFlat [StructFlat (slice (8 * unWordOffset off + n) 2 bs)        [] | n <- zeroto numelts]
     LES_Word    -> ListFlat [StructFlat (sliceWords (unWordOffset off + n) 1 bs)        [] | n <- zeroto numelts]
     --LES_Bit     -> StrFlat [charOfBool (readNthBit bs boff n) | n <- zeroto numelts]
     LES_Bit     -> StrFlat $ "...bitlist(" ++ show numelts ++ ")..."
@@ -280,8 +289,6 @@ derefUnknownPointer n segs ptr =
 
 parseSegment :: ByteString -> [ByteString] -> Object
 parseSegment bs segs =
-  --let ptr = parseStructPointerAt bs 0 in
-  --unflatten 99999 segs $ derefStructPointer ptr segs
   unflatten 99999 segs $ readStructPointerAt 0 bs segs
 
 parseBytes rawbytes =
@@ -291,11 +298,21 @@ parseBytes rawbytes =
 
 instance Pretty Word64 where pretty w = text (show w)
 
+updateNextOffset :: ResizableArrayBuilder -> Word64 -> IO Word64
+updateNextOffset rab prevoffset = do
+  nextoffset <- rabSize rab
+  return $ max prevoffset (fromIntegral nextoffset)
+
+mapL :: String -> (Object -> t) -> Object -> [t]
 mapL _ f (ListObj vals) = map f vals
 mapL _ _ (StructObj bs []) | BS.null bs = []
-mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other)
+mapL _ _ (StrObj "") = []
+mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other) ++ " which is " ++ show other
 
 delta_in_words bo1 bo2 = (bo1 - bo2) `div` 8
+
+sr_list_of_Type_Void voids rab ptr_off data_off = do
+  sr_ptr_list rab ptr_off 0 (fromIntegral $ length voids) (delta_in_words data_off (ptr_off + 8))
 
 sr_Type_UInt8  rab val data_off = rabWriteWord8  rab data_off val
 sr_Type_UInt16 rab val data_off = rabWriteWord16 rab data_off val
@@ -308,6 +325,10 @@ sr_Type_Int64  rab val data_off = rabWriteInt64  rab data_off val
 
 sr_Type_Void :: ResizableArrayBuilder -> () -> Word64 -> IO ()
 sr_Type_Void rab _unit _data_off = return ()
+
+-- TODO...
+sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Word64 -> IO ()
+sr_Type_Bool rab b data_off = return ()
 
 padbyte_offsets o n = [o.. o + n]
 
