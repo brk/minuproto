@@ -309,6 +309,8 @@ mapL _ _ (StructObj bs []) | BS.null bs = []
 mapL _ _ (StrObj "") = []
 mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other) ++ " which is " ++ show other
 
+objsLength objs = fromIntegral $ length objs
+
 delta_in_words bo1 bo2 = (bo1 - bo2) `div` 8
 
 sr_list_of_Type_Void voids rab ptr_off data_off = do

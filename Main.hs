@@ -96,8 +96,14 @@ serializerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
 serializerForType (Type_List t) = text $ "sr_list_of_" ++ show t
 serializerForType t = text ("sr_" ++ show t)
 
-srCall strs = parens (foldl1 (<+>) (map text strs))
-txCall strs = parens (foldl1 (<+>) (         strs))
+match var arms =
+  text "case" <+> text var <+> text "of"
+  <$> indent 2 (vcat [pat <+> text "->" <+> body | (pat, body) <- arms])
+
+doblock stmts = text "do" <$> indent 2 (vcat stmts)
+
+srCall strs = txCall (map text strs)
+txCall txts = parens (foldl1 (<+>) (         txts))
 pair a b = parens (a <> text ", " <> b)
 quoted d = squote <> d <> squote
 quotedStr s = quoted (text s)
@@ -132,20 +138,20 @@ emitFieldSerializer f | (FieldGroup w) <- fieldUnion f =
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node == 0 = do
   let sizedata = nodeStruct_dataWordCount node
-  let size    =  nodeStruct_pointerCount node + sizedata
+  let size     = nodeStruct_pointerCount node + sizedata
+  let args     = [text "obj"]
+  let args'    = map text ["obj", "rab", "ptr_off", "data_off"]
   -- data fields first, then pointer fields
   return $
-        text ("sr" ++ dname ++ " :: " ++ dname ++ " -> IO ByteString")
-    <$> text ("sr" ++ dname ++ " obj = serializeWith obj sr_struct_" ++ show nodeid)
+        fnDeclaration (text $ "sr" ++ dname) args [text dname] (text "IO ByteString")
+    <$> fnDefinition  (text $ "sr" ++ dname) args (srCall ["serializeWith", "obj", "sr_struct_" ++ show nodeid])
     <$> text ""
     <$> text ("sr_struct_" ++ show nodeid ++ " :: " ++ dname ++ " -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
-    <$> text ("sr_struct_" ++ show nodeid ++ " obj rab ptr_off data_off = do")
-    <$> indent 4 (
-                       text "let nextoffset = data_off +" <+> text (show (8 * size))
-                   <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset")
-                   <$> srCall ["sr_ptr_struct rab ptr_off", show sizedata, show (size - sizedata),
-                                                         "(delta_in_words data_off (ptr_off + 8))"]
-                 )
+    <$> fnDefinition (text $ "sr_struct_" ++ show nodeid) args'
+                     (doblock [text "let nextoffset = data_off +" <+> text (show (8 * size))
+                              ,text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset")
+                              ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
+                                                         "(delta_in_words data_off (ptr_off + 8))"]]) -- TODO
     <$> text ""
     <$> lineComment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
     <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset = do")
@@ -156,12 +162,11 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                              let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff] in
                              let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff] in
                              text ("let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
-                         <$> text "case obj of"
-                         <$> indent 4 (vsep [text (fieldCtorName f) <+> text "{}" <+> text "->"
-                                                <+> (text "do" <$> indent 2 (vsep [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                                                                  ,emitFieldSerializer f])
-                                                               <$> indent 2 (vsep (map emitFieldSerializer indiscriminantFields)))
-                                              | f <- discriminatedFields])
+                         <$> match "obj" [(text (fieldCtorName f) <+> text "{}"
+                                          ,doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
+                                                     ,emitFieldSerializer f] ++
+                                                     (map emitFieldSerializer indiscriminantFields))
+                                              | f <- discriminatedFields]
                 )
     <$> text ""
     <$> text ("sr_list_of_" ++ show nodeid ++ " :: [" ++ dname ++ "] -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
@@ -173,18 +178,23 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                    <$> text  "let num_elts = fromIntegral $ length objs"
                    <$> text  "let totalsize = objsize * num_elts"
                    <$> text  "let target_off = data_off + 8" <+> lineComment (text "accounting for tag word")
-                   <$> text ("sr_composite_list_helper rab objsize target_off (target_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
+                   <$> srCall ["sr_composite_list_helper", "rab", "objsize", "target_off", 
+                                 "(target_off + totalsize)", "objs", "sr_struct_helper_" ++ show nodeid]
                    <$> srCall ["sr_ptr_struct", "rab", "data_off", show sizedata, show (size - sizedata), "num_elts"]
-                   <$> text "sr_ptr_list rab ptr_off 7 (totalsize `div` 8) (delta_in_words data_off (ptr_off + 8))"
+                   <$> txCall [text "sr_ptr_list", text "rab", text "ptr_off", text "7",
+                                  srCall ["div", "totalsize", "8"],
+                                  srCall ["delta_in_words", "data_off", "(ptr_off + 8)"]]
              1 -> error $ "Can't yet support serialization of lists of single-bit structs."
              siz ->
                        --text ("let objsize = " ++ show ((byteSizeOfListEncoding siz) * 8) ++ " :: Word64")
                        text  "-- TODO test this..."
                    <$> text  "let objsize = " <> text (show (byteSizeOfListEncoding siz))
-                   <$> text  "let num_elts = fromIntegral $ length objs"
+                   <$> text  "let num_elts = " <> srCall ["objsLength", "objs"]
                    <$> text  "let totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"]
-                   <$> text ("sr_composite_list_helper rab objsize data_off (data_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
-                   <$> text "sr_ptr_list rab ptr_off " <> pretty (show siz) <> text " num_elts (delta_in_words data_off (ptr_off + 8))"
+                   <$> srCall ["sr_composite_list_helper", "rab", "objsize", "data_off", 
+                                 "(data_off + totalsize)", "objs", "sr_struct_helper_" ++ show nodeid]
+                   <$> txCall ((map text ["sr_ptr_list", "rab", "ptr_off", show siz, "num_elts"])
+                                        ++ [srCall ["delta_in_words", "data_off", "(ptr_off + 8)"]])
                   )
     <$> text ""
 
@@ -192,12 +202,11 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let sizedata = nodeStruct_dataWordCount node
   let size    =  nodeStruct_pointerCount node + sizedata
   return $ text ""
-    <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do")
-    <$> indent 4 (
-                       text "let nextoffset = data_off +" <+> text (show (8 * size))
-                   <$> vsep (map emitFieldSerializer (nodeStruct_fields node))
-                 )
-    <$> text ""
+    <$> fnDefinition (text $ "sr_group_" ++ show nodeid)
+                     (map text ["rab", "obj", "nextoffset", "data_off", "ptrs_off"])
+                  (doblock $ (text "let nextoffset = data_off +" <+> text (show (8 * size)))
+                             :map emitFieldSerializer (nodeStruct_fields node))
+                              
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
   return $ text ""
@@ -227,6 +236,12 @@ emitNodeUnionSerializer node dname nodeid = do
 
 multiLineComment doc = vsep [text "{-", doc, text "-}"]
 
+fnDefinition name args body =
+  name <+> hsep args <+> text "=" <+> body <$> text ""
+
+fnDeclaration name _args argtypes retty =
+  name <+> text "::" <+> encloseSep empty empty (text " -> ") (argtypes ++ [retty])
+
 emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminantCount node /= 0 = do
@@ -235,39 +250,41 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
   let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff]
   fieldAccessors <- mapM (emitGroupFieldAccessor indiscriminantFields) discriminatedFields
   let discoffb = nodeStruct_discriminantOffset node * 2
-  return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
-        <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+  let args = [text "obj"]
+  return $  fnDefinition (text $ "mk" ++ dname) args (srCall [fnname, "obj"])
+        <$> fnDeclaration (text fnname) args [text "Object"] (text dname)
+
         <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (text ("case (at bs16 " ++ show discoffb ++ " bs) of"))
         <$> indent 8 (vsep [text (show d) <+> text "->" <+> fieldAccessor | (d, fieldAccessor) <- zip (map fieldDiscriminant discriminatedFields) fieldAccessors])
-        <$> text ""
 
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
   let fnname = "mk_struct_" ++ show nodeid
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
-  return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
-        <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+  let args = [text "obj"]
+  return $  fnDefinition  (text $ "mk" ++ dname) args (srCall [fnname, "obj"])
+        <$> fnDeclaration (text fnname) args [text "Object"] (text dname)
+
         <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (parens (text dname
                                <+> indent 0 (vsep fieldAccessors)))
-        <$> text ""
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
-  return $  text fnname <+> text "::" <+> text "Word16 -> " <> text dname
-        <$> text fnname <+> text "w" <+> text "="
-        <$> indent 2 (text "case w of")
+  let args = [text "w"]
+  return $  fnDeclaration (text fnname) args [text "Word16"] (text dname)
+        <$> fnDefinition  (text fnname) args (
+            indent 2 (text "case w of")
         <$> indent 4 (vsep [text (show (enumerantOrder en)) <+> text "->" <+> text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
-                           | en <- nodeEnum_enumerants node])
-        <$> text ""
+                           | en <- nodeEnum_enumerants node]))
 
 emitNodeUnionBuilder other dname _ = do
   let fnname = "mk" ++ dname
-  return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
-        <$> text fnname <+> text "obj" <+> text " = "
-        <$> indent 4 (parens (text dname
-                               <+> hsep []))
-        <$> text ""
+  let args = [text "obj"]
+  return $  fnDeclaration (text fnname) args [text "Object"] (text dname)
+        <$> fnDefinition  (text fnname) args
+              (indent 4 (parens (text dname <+> hsep [])))
+        <$> lineComment (text "emitNodeUnionBuilder other...?")
 
 emitGroupFieldAccessor commonFields f = do
   accs <- mapM emitFieldAccessor (commonFields ++ [f])
@@ -284,7 +301,7 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
       return $ extractData t offset <+> multiLineComment (text (show t))
 
 emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
-  return $ parens $ text $ "mk_struct_" ++ show w ++ " obj"
+  return $ srCall ["mk_struct_" ++ show w, "obj"]
 
 extractData :: Type_ -> Int -> Doc
 extractData t offset =
