@@ -99,11 +99,21 @@ serializerForType t = text ("sr_" ++ show t)
 srCall strs = parens (foldl1 (<+>) (map text strs))
 txCall strs = parens (foldl1 (<+>) (         strs))
 pair a b = parens (a <> text ", " <> b)
+quoted d = squote <> d <> squote
+quotedStr s = quoted (text s)
+
+instance Pretty Word32 where pretty w = pretty (show w)
+instance Pretty Type_  where pretty w = pretty (show w)
 
 getFieldAccessor f =
   if fieldDiscriminant f /= 0xffff
     then fieldUnCtorName f
     else fieldName f
+
+emitFieldSerializer f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
+  (txCall [serializerForType Type_Bool, text "rab", srCall [getFieldAccessor f, "obj"],
+           text "data_off", pretty offsetInBits])
+     <+> lineComment (text "serialize bool field" <+> quotedStr (fieldName_ f))
 
 emitFieldSerializer f | (FieldSlot w t _) <- fieldUnion f =
   let offsetInBytes = fromIntegral w * byteSizeOfType t in
@@ -112,8 +122,9 @@ emitFieldSerializer f | (FieldSlot w t _) <- fieldUnion f =
       txCall [serializerForType t, srCall [getFieldAccessor f, "obj"], text "rab", parens (text "ptrs_off +" <+> text (show offsetInBytes)), text "nextoffset"]
       <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
     KindData ->
-      txCall [serializerForType t, text "rab", srCall [getFieldAccessor f, "obj"], parens (text ("data_off + " ++ show offsetInBytes))]
-    ) <+> lineComment (text $ "serialize field '" ++ fieldName_ f ++ "'")
+      txCall [serializerForType t, text "rab", srCall [getFieldAccessor f, "obj"],
+              parens (text ("data_off + " ++ show offsetInBytes))]
+    ) <+> lineComment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
 
 emitFieldSerializer f | (FieldGroup w) <- fieldUnion f =
   txCall [text ("sr_group_" ++ (show w)), text "rab", srCall [getFieldAccessor f, "obj"], text "nextoffset", text "data_off", text "ptrs_off"]
@@ -721,7 +732,7 @@ mkField  (StructObj bs (name:annotations:rest)) =
                        0 -> FieldOrdinalImplicit
                        1 -> FieldOrdinalExplicit (at bs16 12 bs)
 
-mkField other = Field "<erroneous field>" 0 0 (FieldGroup 0) FieldOrdinalImplicit
+--mkField other = Field "<erroneous field>" 0 0 (FieldGroup 0) FieldOrdinalImplicit
 mkField other = error $ "mkField couldn't handle\n" ++ show (pretty other)
 
 mkType :: Object -> Type_

@@ -20,6 +20,11 @@ rabToByteString (ResizableArrayBuilder rcap rsiz) = do
     else do words <- sequence [V.read v i | i <- [0 .. s - 1]]
             return $ BS.pack words
 
+rabReadWord8 rab@(ResizableArrayBuilder rcap _rsiz) offset = do
+  rabCheckLimit rab offset
+  v <- readIORef rcap
+  V.read v (fromIntegral offset)
+
 rabSize (ResizableArrayBuilder _rcap rsiz) = do
   readIORef rsiz
 
@@ -46,6 +51,12 @@ rabCheckLimit rab@(ResizableArrayBuilder rcap rsiz) lim = do
 rabWriteWord8_ rab@(ResizableArrayBuilder rcap rsiz) offset value = do
   v <- readIORef rcap
   V.write v (fromIntegral offset) value
+
+rabWriteBit rab offset bitoff value = do
+  let (q,r) = divMod bitoff 8
+  w <- rabReadWord8 rab (offset + fromIntegral q)
+  let w' = if value then setBit w r else clearBit w r
+  rabWriteWord8_ rab (offset + fromIntegral q) w'
  
 rabWriteWord8 :: ResizableArrayBuilder -> Word64 -> Word8 -> IO ()
 rabWriteWord8 rab@(ResizableArrayBuilder rcap rsiz) offset value = do

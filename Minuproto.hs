@@ -327,8 +327,9 @@ sr_Type_Void :: ResizableArrayBuilder -> () -> Word64 -> IO ()
 sr_Type_Void rab _unit _data_off = return ()
 
 -- TODO...
-sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Word64 -> IO ()
-sr_Type_Bool rab b data_off = return ()
+sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Word64 -> Int -> IO ()
+sr_Type_Bool rab b data_off bit_off = do
+  rabWriteBit rab data_off bit_off b
 
 padbyte_offsets o n = [o.. o + n]
 
