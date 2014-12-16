@@ -13,8 +13,8 @@ import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
 import Text.PrettyPrint.ANSI.Leijen
 
---------------------------------------------------------
--- Representation of schema.capnp as a Haskell datatype:
+---------------------------------------------------------------------
+-- Representation of schema.capnp as a hand-written Haskell datatype:
 
 data CodeGeneratorRequest = CodeGeneratorRequest {
     cgrNodes :: [Node]
@@ -78,6 +78,10 @@ data Annotation = Annotation {
     , annotationValue :: Value
 } deriving Show
 
+-- Magic constant: we require that the $optional annotation
+-- be explicitly given a "known" id. Mostly so that this function
+-- can be pure and not monadic. But a nice side effect is separating
+-- the "syntax" (i.e. written-down name) from the semantic effect.
 isOptionalAnnotation (Annotation id _) = id == 0xfdd8d84c51405f88
 
 isFieldOptional f = any isOptionalAnnotation (fieldAnnotations f)
@@ -159,27 +163,6 @@ data Kind = KindData | KindPtr deriving (Eq, Show)
 ---------------------------------------------------------------------
 -- An assortment of pure helper functions:
 
-kindOfType t = case t of
-     Type_Void        -> KindData
-     Type_Bool        -> KindData
-     Type_Int8        -> KindData
-     Type_Int16       -> KindData
-     Type_Int32       -> KindData
-     Type_Int64       -> KindData
-     Type_UInt8       -> KindData
-     Type_UInt16      -> KindData
-     Type_UInt32      -> KindData
-     Type_UInt64      -> KindData
-     Type_Float32     -> KindData
-     Type_Float64     -> KindData
-     Type_Text        -> KindPtr
-     Type_Data        -> KindPtr
-     Type_List      _ -> KindPtr
-     Type_Enum      _ -> KindData
-     Type_Struct    _ -> KindPtr
-     Type_Interface _ -> KindPtr
-     Type_Object      -> KindPtr
-
 byteSizeOfType :: Type_ -> Int
 byteSizeOfType type_ =
     case type_ of
@@ -225,15 +208,6 @@ accessorNameForType type_ =
       Type_Struct    _ -> error $ "no accessor yet for " ++ show type_
       Type_Interface _ -> error $ "no accessor yet for " ++ show type_
       Type_Object      -> error $ "no accessor yet for " ++ show type_
-
-byteSizeOfListEncoding n =
-  case n of
-    2 -> 1
-    3 -> 2
-    4 -> 4
-    5 -> 8
-    6 -> 8
-    _ -> error $ "byteSizeOfListEncoding requires n to be [2..6]; had " ++ show n
 
 --------------------------------------------------------------
 -- Transformation from generic parsed capnp AST representation
@@ -300,7 +274,6 @@ mkField  (StructObj bs (name:annotations:rest)) =
                        0 -> FieldOrdinalImplicit
                        1 -> FieldOrdinalExplicit (at bs16 12 bs)
 
---mkField other = Field "<erroneous field>" 0 0 (FieldGroup 0) FieldOrdinalImplicit
 mkField other = error $ "mkField couldn't handle\n" ++ show (pretty other)
 
 mkType :: Object -> Type_

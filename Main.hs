@@ -73,34 +73,38 @@ targetHeader   = _targetHeader   ?tgt
 -- and avoid duplicating the types of the record fields.
 -- Oh well.
 
-targetFilename :: (?tgt::TargetLanguage) => String -> String
-targetFilename = _targetFilename ?tgt
-targetCall :: (?tgt::TargetLanguage) => [Doc] -> Doc
-targetCall   = _targetCall ?tgt
-targetAtomCall :: (?tgt::TargetLanguage) => [Doc] -> Doc
-targetAtomCall   = _targetCall ?tgt
-match :: (?tgt::TargetLanguage) => String -> [(Doc, Doc)] -> Doc
-match = _targetMatch ?tgt
-doblock :: (?tgt::TargetLanguage) => [Doc] -> Doc
-doblock = _targetDoblock ?tgt
-doerror :: (?tgt::TargetLanguage) => String -> Doc
-doerror = _targetDoerror ?tgt
-ifthen :: (?tgt::TargetLanguage) => Doc -> Doc -> Doc -> Doc
-ifthen = _targetIfthen ?tgt
-comment :: (?tgt::TargetLanguage) => Doc -> Doc
-comment = _targetMultiLineComment ?tgt
-letbinds :: (?tgt::TargetLanguage) => [(String, Doc)] -> Doc
-letbinds = _targetLetbinds ?tgt
-fnDefinition :: (?tgt::TargetLanguage) => Doc -> [Doc] -> [Doc] -> Doc -> Doc -> Doc
-fnDefinition = _targetFnDefinition ?tgt
-emitAdd :: (?tgt::TargetLanguage) => String -> String -> Doc
-emitAdd = _targetEmitAdd ?tgt
-emitMul :: (?tgt::TargetLanguage) => String -> String -> Doc
-emitMul = _targetEmitMul ?tgt
-emitListLength :: (?tgt::TargetLanguage) => Doc -> Doc
-emitListLength = _targetEmitListLength ?tgt
-emitIO :: (?tgt::TargetLanguage) => String -> Doc
-emitIO = _targetEmitIO ?tgt
+targetFilename  :: (?tgt::TargetLanguage) => String -> String
+targetFilename  = _targetFilename ?tgt
+targetCall      :: (?tgt::TargetLanguage) => [Doc] -> Doc
+targetCall      = _targetCall ?tgt
+targetAtomCall  :: (?tgt::TargetLanguage) => [Doc] -> Doc
+targetAtomCall  = _targetCall ?tgt
+match           :: (?tgt::TargetLanguage) => String -> [(Doc, Doc)] -> Doc
+match           = _targetMatch ?tgt
+doblock         :: (?tgt::TargetLanguage) => [Doc] -> Doc
+doblock         = _targetDoblock ?tgt
+doerror         :: (?tgt::TargetLanguage) => String -> Doc
+doerror         = _targetDoerror ?tgt
+ifthen          :: (?tgt::TargetLanguage) => Doc -> Doc -> Doc -> Doc
+ifthen          = _targetIfthen ?tgt
+comment         :: (?tgt::TargetLanguage) => Doc -> Doc
+comment         = _targetMultiLineComment ?tgt
+letbinds        :: (?tgt::TargetLanguage) => [(String, Doc)] -> Doc
+letbinds        = _targetLetbinds ?tgt
+fnDefinition    :: (?tgt::TargetLanguage) => Doc -> [Doc] -> [Doc] -> Doc -> Doc -> Doc
+fnDefinition    = _targetFnDefinition ?tgt
+emitAdd         :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitAdd         = _targetEmitAdd ?tgt
+emitMul         :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitMul         = _targetEmitMul ?tgt
+emitListLength  :: (?tgt::TargetLanguage) => Doc -> Doc
+emitListLength  = _targetEmitListLength ?tgt
+emitIO          :: (?tgt::TargetLanguage) => String -> Doc
+emitIO          = _targetEmitIO ?tgt
+emitBinder      :: (?tgt::TargetLanguage) => String -> Doc
+emitBinder      = _targetEmitBinder ?tgt
+cgFieldSlotType :: (?tgt::TargetLanguage) => Type_ -> CG Doc
+cgFieldSlotType = _targetCgFieldSlotType ?tgt
 
 data TargetLanguage = TargetLanguage {
     _targetHeader   :: String -> Doc
@@ -118,6 +122,8 @@ data TargetLanguage = TargetLanguage {
   , _targetEmitMul          :: String -> String -> Doc
   , _targetEmitListLength   :: Doc    -> Doc
   , _targetEmitIO           :: String -> Doc
+  , _targetEmitBinder       :: String -> Doc
+  , _targetCgFieldSlotType  :: Type_  -> CG Doc
 }
 -- }}}
 
@@ -128,6 +134,7 @@ targetHaskell = TargetLanguage
                   hsIfthen hsMultiLineComment
                   hsLetbinds hsFnDefinition hsEmitAdd
                   hsEmitMul hsEmitListLength hsEmitIO
+                  hsEmitBinder hscgFieldSlotType
   where
     hsTargetFilename protoname = moduleNameOf protoname ++ ".hs"
     hsTargetHeader   protoname = vcat $
@@ -153,13 +160,14 @@ targetHaskell = TargetLanguage
     hsMultiLineComment doc = group $ vsep [text "{-", doc, text "-}"]
 
     hsLetbinds :: [(String, Doc)] -> Doc
-    hsLetbinds bindings = vcat [text "let !" <+> text name <+> text "=" <+> body
+    hsLetbinds bindings = vcat [text "let" <+> hsEmitBinder name <+> text "=" <+> body
                                | (name, body) <- bindings]
 
     hsEmitAdd s1 s2 = hsTargetCall [text s1, text "`plusWord64`", text s2]
     hsEmitMul s1 s2 = hsTargetCall [text s1, text "`mulWord64`",  text s2]
     hsEmitListLength obj = hsTargetCall [text "fromIntegral", hsTargetCall [text "length", obj]]
     hsEmitIO str = text $ "IO " ++ str
+    hsEmitBinder str = text $ "!" ++ str -- Make all binders strict in generated code!
 
     hsFnDefinition name args argtypes retty body =
       let defn = name <+> hsep args <+> text "=" <$> indent 2 body <$> text "" in
@@ -167,6 +175,29 @@ targetHaskell = TargetLanguage
       case argtypes of
         [] ->          defn
         _  -> decl <$> defn
+
+    hscgFieldSlotType type_ =
+        case type_ of
+          Type_Void        -> return $ text "()"
+          Type_Bool        -> return $ text "Bool"
+          Type_Int8        -> return $ text "Int8"
+          Type_Int16       -> return $ text "Int16"
+          Type_Int32       -> return $ text "Int32"
+          Type_Int64       -> return $ text "Int64"
+          Type_UInt8       -> return $ text "Word8"
+          Type_UInt16      -> return $ text "Word16"
+          Type_UInt32      -> return $ text "Word32"
+          Type_UInt64      -> return $ text "Word64"
+          Type_Float32     -> return $ text "Float"
+          Type_Float64     -> return $ text "Double"
+          Type_Text        -> return $ text "String"
+          Type_Data        -> return $ text "ByteString"
+          Type_List      t -> liftM (\tx -> text "[" <> tx <> text "]") (hscgFieldSlotType t)
+          Type_Enum      w -> liftM text (lookupId w)
+          Type_Struct    w -> liftM text (lookupId w)
+          Type_Interface w -> liftM text (lookupId w)
+          Type_Object      -> return $ text "<...object...>"
+
 --- }}}
 
 txCall txts = targetCall txts
@@ -182,94 +213,39 @@ cgCodeGeneratorRequest :: (?tgt::TargetLanguage) => CodeGeneratorRequest -> CG D
 cgCodeGeneratorRequest cgr = do
     -- Build the mapping of node ids to type names for later pretty-printing.
     mapM_ denoteNodeAttributes (cgrNodes cgr)
+
     -- Emit the data type declaration for each node.
     let productiveNodes = filter isNodeProductive (cgrNodes cgr)
     ns <- mapM cgNode productiveNodes
-    -- Emit builders for each node.
-    builders <- mapM emitNodeBuilder productiveNodes
+
+    -- Emit builders and serializers for each node.
+    builders    <- mapM emitNodeBuilder    productiveNodes
     serializers <- mapM emitNodeSerializer productiveNodes
     return $ vsep $ ns ++ builders ++ serializers
+ where
+    denoteNodeAttributes node = do
+      denoteNodeId node
+      case nodeUnion node of
+        ns@(NodeStruct {}) -> do
+          denoteStructEncodingTag (nodeId node)
+                                  (nodeStruct_preferredListEncoding ns)
+        _ -> return ()
+    denoteNodeId node = do
+      denoteId (nodeId node) (nodeDisplayName node)
 
-isNodeProductive node =
-  case nodeUnion node of
-    NodeFile -> False
-    NodeAnnotation {} -> False
-    _ -> True
+    isNodeProductive node =
+      case nodeUnion node of
+        NodeFile -> False
+        NodeAnnotation {} -> False
+        _ -> True
 
-emitNodeSerializer node =
-  emitNodeUnionSerializer (nodeUnion node) (nodeDisplayName node) (nodeId node)
+    emitNodeSerializer node =
+      emitNodeUnionSerializer (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
-splitFields fields =
-  (filter (isSlotOfKind KindData) fields,
-   filter (isSlotOfKind KindPtr)  fields)
+    emitNodeBuilder node =
+      emitNodeUnionBuilder    (nodeUnion node) (nodeDisplayName node) (nodeId node)
 
-isSlotOfKind k f =
-  case fieldUnion f of
-    FieldSlot _ t _ -> kindOfType t == k
-    _ -> False
-
-makerForType (Type_Enum   w) = text $ "mk_enum_"   ++ show w
-makerForType (Type_Struct w) = text $ "mk_struct_" ++ show w
-makerForType (Type_List (Type_Struct w)) = text $ "sr_list_of_" ++ show w
-makerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
-makerForType (Type_List t) = text $ "sr_list_of_" ++ show t
-makerForType t = text ("sr_" ++ show t)
-
-serializerForType (Type_Enum   w) = text $ "sr_enum_"   ++ show w
-serializerForType (Type_Struct w) = text $ "sr_struct_" ++ show w
-serializerForType (Type_List (Type_Struct w)) = text $ "sr_list_of_" ++ show w
-serializerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
-serializerForType (Type_List t) = text $ "sr_list_of_" ++ show t
-serializerForType t = text ("sr_" ++ show t)
-
-nodeDisplayName n = legalizeTypeName $ nodeDisplayName_ n
-
-serializerForGroup w = text $ "sr_group_" ++ show w
-
-helperForStructSerializer nodeid = "sr_struct_helper_" ++ show nodeid
-
-quoted d = squote <> d <> squote
-quotedStr s = quoted (text s)
-
-instance Pretty Word16 where pretty w = text (show w)
-instance Pretty Word32 where pretty w = pretty (show w)
-instance Pretty Type_  where pretty w = pretty (show w)
-
-
-getFieldAccessor typename f =
-  if fieldDiscriminant f /= 0xffff
-    then fieldUnCtorName typename f
-    else fieldName       typename f
-
-serializerForFieldType f t =
-  if isFieldOptional f
-    then txCall [text "sr_Maybe", serializerForType t]
-    else serializerForType t
-
--- Individual bits must be specially serialized, because their offsets
--- are measured in bits, not bytes.
-emitFieldSerializer typename f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
-  (txCall [serializerForFieldType f Type_Bool, text "rab", srCall [getFieldAccessor typename f, "obj"],
-           text "data_off", pretty offsetInBits])
-     <+> comment (text "serialize bool field" <+> quotedStr (fieldName_ f))
-
-emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
-  let offsetInBytes = fromIntegral w * byteSizeOfType t in
-  (case kindOfType t of
-    KindPtr ->
-      txCall [serializerForFieldType f t, srCall [getFieldAccessor typename f, "obj"],
-                     text "rab",  (emitAdd "ptrs_off" (show offsetInBytes)), text "nextoffset"]
-      <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
-    KindData ->
-      txCall [serializerForFieldType f t, text "rab", srCall [getFieldAccessor typename f, "obj"],
-              (emitAdd "data_off" (show offsetInBytes))]
-    ) <+> comment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
-
-emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
-  txCall [serializerForGroup w,
-          text "rab", srCall [getFieldAccessor typename f, "obj"],
-          text "nextoffset", text "data_off", text "ptrs_off"]
-    <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")
+-- {{{ Serializing individual nodes (structs, enums, etc):
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node == 0 = do
   let sizedata = nodeStruct_dataWordCount node
@@ -277,12 +253,12 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let fnname   = serializerForType (Type_Struct nodeid)
   -- data fields first, then pointer fields
   return $
-        fnDefinition (text $ "sr" ++ dname) [text "obj"] [text dname] (retTy (emitIO "ByteString"))
+        fnDefinition (text $ "sr" ++ dname) (splitArgs "obj") [text dname] (retTy (emitIO "ByteString"))
                      (txCall [text "serializeWith", text "obj", fnname])
     <$> fnDefinition fnname (splitArgs "obj rab ptr_off data_off")
                      (map text [dname, "ResizableArrayBuilder", "Word64", "Word64"]) (retTy (emitIO "()"))
                      (doblock [letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))]
-                              ,txCall (splitArgs $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
+                              ,srCall (split " " $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
                                             show (txCall [text "delta_in_words", text "data_off",
                                                           emitAdd "ptr_off" "8"])]])
@@ -306,7 +282,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                        ])
     <$> fnDefinition (text ("sr_list_of_" ++ show nodeid))
                      (splitArgs "objs rab ptr_off data_off")
-                     (splitArgs ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy (emitIO "()"))
+                     (splitTys ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy (emitIO "()"))
          (doblock [
             case nodeStruct_preferredListEncoding node of
              7 ->  letbinds [("objsize", text $ show (size * 8) ++ " :: Word64")
@@ -356,27 +332,59 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
 
 emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
   let fnname = serializerForType (Type_Enum nodeid)
-  return $ fnDefinition fnname (splitArgs "!rab !e !offset")
+  return $ fnDefinition fnname (splitArgs "rab e offset")
                         [text "ResizableArrayBuilder", text dname, text "Word64"] (retTy (emitIO "()"))
               (doblock [letbinds [("value",
                                match "e"
                                 [ (text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
                                   ,pretty (enumerantOrder en))
                                 | en <- nodeEnum_enumerants node])]
-                       ,txCall (splitArgs "rabWriteWord16 rab offset value")])
+                       ,srCall (split " " "rabWriteWord16 rab offset value")])
 
 emitNodeUnionSerializer node dname nodeid = do
   return $ comment $ string (show (dname, nodeid, node))
------
 
-noArgTys = []
-noRetTy = empty
-retTy d = d
+-------------------------------
 
-splitArgs args = map text $ split " " args
+-- Individual bits must be specially serialized, because their offsets
+-- are measured in bits, not bytes.
+emitFieldSerializer typename f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
+  (txCall [serializerForFieldType f Type_Bool,
+              text "rab", srCall [getFieldAccessor typename f, "obj"],
+              text "data_off", pretty offsetInBits])
+     <+> comment (text "serialize bool field" <+> quotedStr (fieldName_ f))
 
-emitNodeBuilder node = emitNodeUnionBuilder (nodeUnion node) (nodeDisplayName node) (nodeId node)
+emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
+  let offsetInBytes = fromIntegral w * byteSizeOfType t in
+  (case kindOfType t of
+    KindPtr ->
+      txCall [serializerForFieldType f t,
+                     srCall [getFieldAccessor typename f, "obj"],
+                     text "rab",  (emitAdd "ptrs_off" (show offsetInBytes)), text "nextoffset"]
+      <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
+    KindData ->
+      txCall [serializerForFieldType f t, text "rab", srCall [getFieldAccessor typename f, "obj"],
+              (emitAdd "data_off" (show offsetInBytes))]
+    ) <+> comment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
 
+emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
+  txCall [serializerForGroup w,
+          text "rab", srCall [getFieldAccessor typename f, "obj"],
+          text "nextoffset", text "data_off", text "ptrs_off"]
+    <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")
+
+getFieldAccessor typename f =
+  if fieldDiscriminant f /= 0xffff
+    then fieldUnCtorName typename f
+    else fieldName       typename f
+
+serializerForFieldType f t =
+  if isFieldOptional f
+    then txCall [text "sr_Maybe", serializerForType t]
+    else serializerForType t
+-- }}}
+
+-- {{{
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminantCount node /= 0 = do
   let fnname = makerForType (Type_Struct nodeid)
   let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff]
@@ -404,7 +412,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
-  return $  fnDefinition (text fnname) [text "wx"] [text "Word16"] (retTy $ text dname)
+  return $  fnDefinition (text fnname) [emitBinder "wx"] [text "Word16"] (retTy $ text dname)
                          (match "wx"
                             [(text (show (enumerantOrder en))
                              ,text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en))
@@ -412,11 +420,8 @@ emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
 
 emitNodeUnionBuilder other dname _ = do
   let fnname = "mk" ++ dname
-  return $  text fnname <+> text "::" <+> text "Object -> " <> text dname
-        <$> text fnname <+> text "obj" <+> text " = "
-        <$> indent 4 (parens (text dname
-                               <+> hsep []))
-        <$> text ""
+  return $  fnDefinition (text fnname) [emitBinder "objx"] [text "Object"] (retTy $ text dname)
+                         (srCall [dname, "objx"])
 
 emitGroupFieldAccessor typename commonFields f = do
   accs <- mapM emitFieldAccessor (commonFields ++ [f])
@@ -435,6 +440,8 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
 emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
   return $ txCall [makerForType (Type_Struct w), text "obj"]
 
+------------------------------------------------------------------------
+
 extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
   let accessor = srCall ["at", accessorNameForType t, show offset, "bs"] in
@@ -443,45 +450,60 @@ extractData t offset =
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
     _           -> accessor
 
-extractPtrFunc :: Field -> Type_ -> Doc
-extractPtrFunc f t =
-   let wrapper d = if isFieldOptional f
-                     then text "_mkMaybe" <+> d
-                     else                     d
-   in wrapper $ case t of
-     Type_Text        -> text "unStrObj"
-     Type_Data        -> text "unBytes"
-     Type_List      x -> error $ "xPF List of " ++ show x
-     Type_Struct    _ -> makerForType t
-     Type_Interface _ -> error "xPF Interface"
-     Type_Object      -> error "xPF Object"
-     Type_Void        -> text "mk_void"
-     Type_Bool        -> text "mk_Bool"
-     Type_UInt64      -> text "mk_Word64"
-     _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
-
 extractPtr :: (?tgt::TargetLanguage) => Field -> String -> Type_ -> Int -> Doc
 extractPtr f msg t offset =
-  let ptr = srCall ["lookupPointer", show msg, "ptrs", show offset] in
   parens $
     case t of
-     Type_Text        -> extractPtrFunc f t <+> ptr
-     Type_Data        -> extractPtrFunc f t <+> ptr
-     Type_List      x -> text ("mapL \"" ++ show x ++ "\"") <+> extractPtrFunc f x <+> ptr
-     Type_Struct    _ -> extractPtrFunc f t <+> ptr
+     Type_Text        -> txCall [extractPtrFunc t, ptr]
+     Type_Data        -> txCall [extractPtrFunc t, ptr]
+     Type_List      x -> txCall [text "mapL",  text ("\"" ++ show x ++ "\""), extractPtrFunc x, ptr]
+     Type_Struct    _ -> txCall [extractPtrFunc t, ptr]
      Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
+ where
+   ptr = srCall ["lookupPointer", show msg, "ptrs", show offset]
+   wrapper d = if isFieldOptional f then txCall [text "_mkMaybe", d]
+                                    else                          d
+   extractPtrFunc t =
+     wrapper $ case t of
+        Type_Text        -> text "unStrObj"
+        Type_Data        -> text "unBytes"
+        Type_List      x -> error $ "xPF List of " ++ show x
+        Type_Struct    _ -> makerForType t
+        Type_Interface _ -> error "xPF Interface"
+        Type_Object      -> error "xPF Object"
+        Type_Void        -> text "mk_void"
+        Type_Bool        -> text "mk_Bool"
+        Type_UInt64      -> text "mk_Word64"
+        _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+-- }}}
 
-spanList _ [] = ([],[])
-spanList func list@(x:xs) =
-    if func list
-       then (x:ys,zs)
-       else ([],list)
-    where (ys,zs) = spanList func xs
+makerForType (Type_Enum   w) = text $ "mk_enum_"   ++ show w
+makerForType (Type_Struct w) = text $ "mk_struct_" ++ show w
+makerForType (Type_List (Type_Struct w)) = text $ "sr_list_of_" ++ show w
+makerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
+makerForType (Type_List t) = text $ "sr_list_of_" ++ show t
+makerForType t = text ("sr_" ++ show t)
 
-breakList :: ([a] -> Bool) -> [a] -> ([a], [a])
-breakList func = spanList (not . func)
+serializerForType (Type_Enum   w) = text $ "sr_enum_"   ++ show w
+serializerForType (Type_Struct w) = text $ "sr_struct_" ++ show w
+serializerForType (Type_List (Type_Struct w)) = text $ "sr_list_of_" ++ show w
+serializerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
+serializerForType (Type_List t) = text $ "sr_list_of_" ++ show t
+serializerForType t = text ("sr_" ++ show t)
+
+serializerForGroup w = text $ "sr_group_" ++ show w
+
+helperForStructSerializer nodeid = "sr_struct_helper_" ++ show nodeid
+
+noArgTys = []
+noRetTy = empty
+retTy d = d
+
+splitArgs args = map emitBinder $ split " " args
+splitTys  args = map text       $ split " " args
+
 
 split :: Eq a => [a] -> [a] -> [[a]]
 split _ [] = []
@@ -494,30 +516,36 @@ split delim str =
                                         then [] : []
                                         else split delim
                                                  (drop (length delim) x)
+  where
+      spanList _ [] = ([],[])
+      spanList func list@(x:xs) =
+          if func list
+            then (x:ys,zs)
+            else ([],list)
+          where (ys,zs) = spanList func xs
+
+      breakList :: ([a] -> Bool) -> [a] -> ([a], [a])
+      breakList func = spanList (not . func)
+
 sjoin delim s = concat (intersperse delim s)
 replace old new s = sjoin new . split old $ s
 legalizeTypeName fs = case split ":" fs of
                         [_, s] -> replace "." "_" s
                         [s]    -> replace "." "_" s
 
-denoteNodeAttributes node = do
-  denoteNodeId node
-  case nodeUnion node of
-     ns@(NodeStruct {}) -> do
-       denoteStructEncodingTag (nodeId node)
-                               (nodeStruct_preferredListEncoding ns)
-     _ -> return ()
+capitalizeFirstLetter [] = []
+capitalizeFirstLetter (h:t) = toUpper h : t
 
-denoteNodeId node = do
-  denoteId (nodeId node) (nodeDisplayName node)
+legalizeIdent "type" = "type_"
+legalizeIdent "id"   = "id_"
+legalizeIdent str = str
 
 cgNode :: (?tgt::TargetLanguage) => Node -> CG Doc
 cgNode node = do
     arms <- computeDataArms (nodeDisplayName node) (nodeUnion node)
     return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms
-          <$> comment (string (show node))
 
-computeDataArms :: String -> NodeUnion -> CG [(Doc, [Doc])]
+computeDataArms :: (?tgt::TargetLanguage) => String -> NodeUnion -> CG [(Doc, [Doc])]
 computeDataArms _  NodeFile = return []
 computeDataArms _  (NodeConst t v) = error $ "computeDataArms NodeConst"
 computeDataArms _  (NodeInterface _) = error $ "computeDataArms NodeInterface"
@@ -559,62 +587,31 @@ strictField doc = text "!" <> doc
 fieldCtorName   typename f = capitalizeFirstLetter $ fieldName typename f
 fieldUnCtorName typename f = "un" ++ fieldCtorName typename f
 
-capitalizeFirstLetter [] = []
-capitalizeFirstLetter (h:t) = toUpper h : t
-
-legalizeIdent "type" = "type_"
-legalizeIdent "id"   = "id_"
-legalizeIdent str = str
-
 cgFieldUnion f (FieldGroup w)    = do liftM text (lookupId w)
 cgFieldUnion f (FieldSlot _ t _) = do ty <- cgFieldSlotType t
                                       if isFieldOptional f
                                         then return $ parens $ text "StrictMaybe" <+> ty
                                         else return ty
-cgFieldSlotType type_ =
-    case type_ of
-      Type_Void        -> return $ text "()"
-      Type_Bool        -> return $ text "Bool"
-      Type_Int8        -> return $ text "Int8"
-      Type_Int16       -> return $ text "Int16"
-      Type_Int32       -> return $ text "Int32"
-      Type_Int64       -> return $ text "Int64"
-      Type_UInt8       -> return $ text "Word8"
-      Type_UInt16      -> return $ text "Word16"
-      Type_UInt32      -> return $ text "Word32"
-      Type_UInt64      -> return $ text "Word64"
-      Type_Float32     -> return $ text "Float"
-      Type_Float64     -> return $ text "Double"
-      Type_Text        -> return $ text "String"
-      Type_Data        -> return $ text "ByteString"
-      Type_List      t -> do tx <- cgFieldSlotType t
-                             return $ text "[" <> tx <> text "]"
-      Type_Enum      w -> liftM text (lookupId w)
-      Type_Struct    w -> liftM text (lookupId w)
-      Type_Interface w -> liftM text (lookupId w)
-      Type_Object      -> return $ text "<...object...>"
-
 formatDataDecl name nodeid arms =
       comment (pretty nodeid)
   <$> text "data" <+> text name <+> text "="
         <$> indent 4 (cases (map formatDataArm arms)
                       <$> text "deriving Show")
         <$> text ""
+  where
+      cases :: [Doc] -> Doc
+      cases []         = text ""
+      cases [doc]      = doc
+      cases (doc:docs) = vsep $ (text " " <+> doc) : (map (\d -> text "|" <+> d) docs)
 
-formatDataArm (armName, []) = armName
+      formatDataArm (armName, []) = armName
+      formatDataArm (armName, armFields) =
+        armName <+> text "{"
+          <$> indent 4 (embedded armFields)
+          <$> text "}"
 
-formatDataArm (armName, armFields) =
-  armName <+> text "{"
-    <$> indent 4 (embedded armFields)
-    <$> text "}"
-
-cases :: [Doc] -> Doc
-cases []         = text ""
-cases [doc]      = doc
-cases (doc:docs) = vsep $ (text " " <+> doc) : (map (\d -> text "|" <+> d) docs)
-
-embedded :: [Doc] -> Doc
-embedded docs = vsep $ map (\(d,p) -> text p <+> d) (zip docs (" ":repeat ","))
+      embedded :: [Doc] -> Doc
+      embedded docs = vsep $ map (\(d,p) -> text p <+> d) (zip docs (" ":repeat ","))
 
 denoteId :: Word64 -> String -> CG ()
 denoteId w s = do
@@ -632,6 +629,38 @@ denoteStructEncodingTag :: Word64 -> Word16 -> CG ()
 denoteStructEncodingTag w v = do
   CG_State m1 m2 <- get
   put $ CG_State m1 (Map.insert w v m2)
+
+------------------------------------------------------------
+
+kindOfType t = case t of
+     Type_Void        -> KindData
+     Type_Bool        -> KindData
+     Type_Int8        -> KindData
+     Type_Int16       -> KindData
+     Type_Int32       -> KindData
+     Type_Int64       -> KindData
+     Type_UInt8       -> KindData
+     Type_UInt16      -> KindData
+     Type_UInt32      -> KindData
+     Type_UInt64      -> KindData
+     Type_Float32     -> KindData
+     Type_Float64     -> KindData
+     Type_Text        -> KindPtr
+     Type_Data        -> KindPtr
+     Type_List      _ -> KindPtr
+     Type_Enum      _ -> KindData
+     Type_Struct    _ -> KindPtr
+     Type_Interface _ -> KindPtr
+     Type_Object      -> KindPtr
+
+byteSizeOfListEncoding n =
+  case n of
+    2 -> 1
+    3 -> 2
+    4 -> 4
+    5 -> 8
+    6 -> 8
+    _ -> error $ "byteSizeOfListEncoding requires n to be [2..6]; had " ++ show n
 
 ------------------------------------------------------------
 -- For a NodeStruct, we get a pointer to the serialized struct
@@ -652,4 +681,13 @@ lookupListEltSizeTag w = do
   return $ case Map.lookup w m of
               Nothing -> error $ "Unknown list elt size for " ++ show w
               Just v  -> v
+
+nodeDisplayName n = legalizeTypeName $ nodeDisplayName_ n
+
+quoted d = squote <> d <> squote
+quotedStr s = quoted (text s)
+
+instance Pretty Word16 where pretty w = text (show w)
+instance Pretty Word32 where pretty w = pretty (show w)
+instance Pretty Type_  where pretty w = pretty (show w)
 

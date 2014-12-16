@@ -167,15 +167,15 @@ instance Show Pointer where
   show (StructPtr _ _ off ndw npw) = "(StructPtr " ++ show ndw ++ " " ++ show npw ++ ")"
   show (ListPtr   _ orig off eltsz nelts) = "(ListPtr " ++ show orig ++ " " ++ show off ++ " " ++ show nelts ++ ")"
 
-data FlatObj = StructFlat ByteString [Pointer]
-             | ListFlat   [FlatObj]
-             | StrFlat    String
+data FlatObj = StructFlat !ByteString ![Pointer]
+             | ListFlat   ![FlatObj]
+             | StrFlat    !String
              deriving Show
 
-data Object = StructObj ByteString [Object]
-            | ListObj   [Object]
-            | StrObj     String
-            | InvalidObj String
+data Object = StructObj  !ByteString ![Object]
+            | ListObj    ![Object]
+            | StrObj     !String
+            | InvalidObj !String
              deriving Show
 
 dropLastByte str = take (length str - 1) str
