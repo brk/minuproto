@@ -22,17 +22,18 @@ import qualified Data.Map as Map
 import Data.List(intersperse, isPrefixOf)
 
 import Control.Monad.State
-import System.IO(withFile, IOMode(WriteMode))
+import System.IO(withFile, stdin, IOMode(WriteMode))
 
 main = do
-  rawbytes <- BS.readFile "testdata/test2.schema.bin"
+  rawbytes <- BS.hGetContents stdin
   let segments@(seg:_) = splitSegments rawbytes
   let obj = parseSegment seg segments
-  --putDoc $ pretty obj <> line
   putStrLn $ "had this many segments: " ++ show (length segments)
   let cgr = mkCodeGeneratorRequest obj
   let hs_code_doc = evalState (cgHS cgr) (CG_State Map.empty Map.empty)
-  putDoc $ hs_code_doc
+  --putStrLn $ "obj is:"
+  --putDoc $ pretty obj <> line
+  --putDoc $ hs_code_doc
   modularizeAndPutDocToFile hs_code_doc (rfName ((cgrRequestedFiles cgr) !! 0))
 
 ------------------------------------------------------------
@@ -40,14 +41,17 @@ moduleNameOf str = capitalizeFirstLetter $ replaceWith '.' '_' str
 replaceWith c r str = map (\v -> if v == c then r else v) str
 ------------------------------------------------------------
 modularizeAndPutDocToFile d protoname =
-  putDocToFile (vsep [ text "module" <+> text (moduleNameOf protoname) <+> text "where"
+  putDocToFile (vsep [ text "{-# LANGUAGE BangPatterns #-}"
+                     , text "module" <+> text (moduleNameOf protoname) <+> text "where"
                      , text "import Data.ByteString(ByteString)"
                      , text "import Minuproto"
                      , text "import ResizableArrayBuilder"
                      , text "import Data.Word"
+                     , text "import Data.Int"
                      ] <$> d) (moduleNameOf protoname ++ ".hs")
 ------------------------------------------------------------
 putDocToFile d f = do
+  putStrLn $ "writing to output file " ++ f
   withFile f WriteMode (\h -> hPutDoc h d)
 ------------------------------------------------------------
 
@@ -105,29 +109,34 @@ quotedStr s = quoted (text s)
 instance Pretty Word32 where pretty w = pretty (show w)
 instance Pretty Type_  where pretty w = pretty (show w)
 
-getFieldAccessor f =
+getFieldAccessor typename f =
   if fieldDiscriminant f /= 0xffff
-    then fieldUnCtorName f
-    else fieldName f
+    then fieldUnCtorName typename f
+    else fieldName       typename f
 
-emitFieldSerializer f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
-  (txCall [serializerForType Type_Bool, text "rab", srCall [getFieldAccessor f, "obj"],
+serializerForFieldType f t =
+  if isFieldOptional f
+    then text "sr_Maybe" <+> serializerForType t -- Note: assuming juxtaposition call syntax...
+    else serializerForType t
+
+emitFieldSerializer typename f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
+  (txCall [serializerForFieldType f Type_Bool, text "rab", srCall [getFieldAccessor typename f, "obj"],
            text "data_off", pretty offsetInBits])
      <+> lineComment (text "serialize bool field" <+> quotedStr (fieldName_ f))
 
-emitFieldSerializer f | (FieldSlot w t _) <- fieldUnion f =
+emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
   let offsetInBytes = fromIntegral w * byteSizeOfType t in
   (case kindOfType t of
     KindPtr ->
-      txCall [serializerForType t, srCall [getFieldAccessor f, "obj"], text "rab", parens (text "ptrs_off +" <+> text (show offsetInBytes)), text "nextoffset"]
+      txCall [serializerForFieldType f t, srCall [getFieldAccessor typename f, "obj"], text "rab", parens (text "ptrs_off +" <+> text (show offsetInBytes)), text "nextoffset"]
       <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
     KindData ->
-      txCall [serializerForType t, text "rab", srCall [getFieldAccessor f, "obj"],
+      txCall [serializerForFieldType f t, text "rab", srCall [getFieldAccessor typename f, "obj"],
               parens (text ("data_off + " ++ show offsetInBytes))]
     ) <+> lineComment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
 
-emitFieldSerializer f | (FieldGroup w) <- fieldUnion f =
-  txCall [text ("sr_group_" ++ (show w)), text "rab", srCall [getFieldAccessor f, "obj"], text "nextoffset", text "data_off", text "ptrs_off"]
+emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
+  txCall [text ("sr_group_" ++ (show w)), text "rab", srCall [getFieldAccessor typename f, "obj"], text "nextoffset", text "data_off", text "ptrs_off"]
     <+> lineComment (text $ "serialize group '" ++ fieldName_ f ++ "'")
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node == 0 = do
@@ -136,43 +145,43 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   -- data fields first, then pointer fields
   return $
         text ("sr" ++ dname ++ " :: " ++ dname ++ " -> IO ByteString")
-    <$> text ("sr" ++ dname ++ " obj = serializeWith obj sr_struct_" ++ show nodeid)
+    <$> text ("sr" ++ dname ++ " !obj = serializeWith obj sr_struct_" ++ show nodeid)
     <$> text ""
     <$> text ("sr_struct_" ++ show nodeid ++ " :: " ++ dname ++ " -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
-    <$> text ("sr_struct_" ++ show nodeid ++ " obj rab ptr_off data_off = do")
+    <$> text ("sr_struct_" ++ show nodeid ++ " !obj !rab !ptr_off !data_off = do")
     <$> indent 4 (
-                       text "let nextoffset = data_off +" <+> text (show (8 * size))
+                       text "let !nextoffset = data_off +" <+> text (show (8 * size))
                    <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset")
                    <$> srCall ["sr_ptr_struct rab ptr_off", show sizedata, show (size - sizedata),
                                                          "(delta_in_words data_off (ptr_off + 8))"]
                  )
     <$> text ""
     <$> lineComment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
-    <$> text ("sr_struct_helper_" ++ show nodeid ++ " obj rab data_off nextoffset = do")
-    <$> indent 4 (     text "let ptrs_off = data_off +" <+> text (show (8 * sizedata))
+    <$> text ("sr_struct_helper_" ++ show nodeid ++ " !obj !rab !data_off !nextoffset = do")
+    <$> indent 4 (     text "let !ptrs_off = data_off +" <+> text (show (8 * sizedata))
                    <$> if nodeStruct_discriminantCount node == 0
-                        then vsep (map emitFieldSerializer (nodeStruct_fields node))
+                        then vsep (map (emitFieldSerializer dname) (nodeStruct_fields node))
                         else 
                              let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff] in
                              let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff] in
-                             text ("let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
+                             text ("let !absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
                          <$> text "case obj of"
-                         <$> indent 4 (vsep [text (fieldCtorName f) <+> text "{}" <+> text "->"
+                         <$> indent 4 (vsep [text (fieldCtorName dname f) <+> text "{}" <+> text "->"
                                                 <+> (text "do" <$> indent 2 (vsep [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                                                                  ,emitFieldSerializer f])
-                                                               <$> indent 2 (vsep (map emitFieldSerializer indiscriminantFields)))
+                                                                                  ,emitFieldSerializer dname f])
+                                                               <$> indent 2 (vsep (map (emitFieldSerializer dname) indiscriminantFields)))
                                               | f <- discriminatedFields])
                 )
     <$> text ""
     <$> text ("sr_list_of_" ++ show nodeid ++ " :: [" ++ dname ++ "] -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()")
-    <$> text ("sr_list_of_" ++ show nodeid ++ " objs rab ptr_off data_off = do")
+    <$> text ("sr_list_of_" ++ show nodeid ++ " !objs !rab !ptr_off !data_off = do")
     <$> indent 4 (
            case nodeStruct_preferredListEncoding node of
              7 ->
-                       text ("let objsize = " ++ show (size * 8) ++ " :: Word64")
-                   <$> text  "let num_elts = fromIntegral $ length objs"
-                   <$> text  "let totalsize = objsize * num_elts"
-                   <$> text  "let target_off = data_off + 8" <+> lineComment (text "accounting for tag word")
+                       text ("let !objsize = " ++ show (size * 8) ++ " :: Word64")
+                   <$> text  "let !num_elts = fromIntegral $ length objs"
+                   <$> text  "let !totalsize = objsize * num_elts"
+                   <$> text  "let !target_off = data_off + 8" <+> lineComment (text "accounting for tag word")
                    <$> text ("sr_composite_list_helper rab objsize target_off (target_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
                    <$> srCall ["sr_ptr_struct", "rab", "data_off", show sizedata, show (size - sizedata), "num_elts"]
                    <$> text "sr_ptr_list rab ptr_off 7 (totalsize `div` 8) (delta_in_words data_off (ptr_off + 8))"
@@ -180,9 +189,9 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
              siz ->
                        --text ("let objsize = " ++ show ((byteSizeOfListEncoding siz) * 8) ++ " :: Word64")
                        text  "-- TODO test this..."
-                   <$> text  "let objsize = " <> text (show (byteSizeOfListEncoding siz))
-                   <$> text  "let num_elts = fromIntegral $ length objs"
-                   <$> text  "let totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"]
+                   <$> text  "let !objsize = " <> text (show (byteSizeOfListEncoding siz))
+                   <$> text  "let !num_elts = fromIntegral $ length objs"
+                   <$> text  "let !totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"]
                    <$> text ("sr_composite_list_helper rab objsize data_off (data_off + totalsize) objs sr_struct_helper_" ++ show nodeid ++ "")
                    <$> text "sr_ptr_list rab ptr_off " <> pretty (show siz) <> text " num_elts (delta_in_words data_off (ptr_off + 8))"
                   )
@@ -192,29 +201,29 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let sizedata = nodeStruct_dataWordCount node
   let size    =  nodeStruct_pointerCount node + sizedata
   return $ text ""
-    <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do")
+    <$> text ("sr_group_" ++ show nodeid ++ " !rab !obj !nextoffset !data_off !ptrs_off = do")
     <$> indent 4 (
-                       text "let nextoffset = data_off +" <+> text (show (8 * size))
-                   <$> vsep (map emitFieldSerializer (nodeStruct_fields node))
+                       text "let !nextoffset = data_off +" <+> text (show (8 * size))
+                   <$> vsep (map (emitFieldSerializer dname) (nodeStruct_fields node))
                  )
     <$> text ""
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
   return $ text ""
     <$> text ("sr_group_" ++ show nodeid ++ " rab obj nextoffset data_off ptrs_off = do")
-    <$> indent 4 (text $ "let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
+    <$> indent 4 (text $ "let !absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
     <$> indent 4 (text "case obj of")
-    <$> indent 6 (vsep [text (fieldCtorName f) <+> text "{}" <+> text "->"
+    <$> indent 6 (vsep [text (fieldCtorName dname f) <+> text "{}" <+> text "->"
                           <+> (text "do" <$> indent 2 (vsep [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                                            ,emitFieldSerializer f]))
+                                                            ,emitFieldSerializer dname f]))
                         | f <- nodeStruct_fields node])
     <$> text ""
 
 emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
   let fnname = "sr_enum_" ++ show nodeid
   return $ text (fnname ++ " :: ResizableArrayBuilder -> " ++ dname ++ " -> Word64 -> IO ()")
-        <$> text fnname <+> text "rab e offset" <+> text "= do"
-        <$> indent 2 (text "let value =" <+> (indent 0 $ (text "case e of")
+        <$> text fnname <+> text "!rab !e !offset" <+> text "= do"
+        <$> indent 2 (text "let !value =" <+> (indent 0 $ (text "case e of")
             <$> indent 2 (vsep [text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
                                               <+> text "->" <+> text (show (enumerantOrder en))
                               | en <- nodeEnum_enumerants node])))
@@ -231,10 +240,11 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
   let fnname = "mk_struct_" ++ show nodeid
   let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff]
   let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff]
-  fieldAccessors <- mapM (emitGroupFieldAccessor indiscriminantFields) discriminatedFields
+  fieldAccessors <- mapM (emitGroupFieldAccessor dname indiscriminantFields) discriminatedFields
   let discoffb = nodeStruct_discriminantOffset node * 2
   return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
         <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj | isDefaultObj obj = error $ " <> text (show $ "Unset value in non-optional field of type " ++ show dname)
         <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (text ("case (at bs16 " ++ show discoffb ++ " bs) of"))
         <$> indent 8 (vsep [text (show d) <+> text "->" <+> fieldAccessor | (d, fieldAccessor) <- zip (map fieldDiscriminant discriminatedFields) fieldAccessors])
@@ -245,6 +255,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
   return $  text ("mk" ++ dname ++ " obj = " ++ fnname ++ " obj")
         <$> text fnname <+> text "::" <+> text "Object -> " <> text dname
+        <$> text fnname <+> text "obj | isDefaultObj obj = error $ " <> text (show $ "Unset value in non-optional field of type " ++ show dname)
         <$> text fnname <+> text "obj@(StructObj bs ptrs)" <+> text " = do "
         <$> indent 4 (parens (text dname
                                <+> indent 0 (vsep fieldAccessors)))
@@ -267,15 +278,15 @@ emitNodeUnionBuilder other dname _ = do
                                <+> hsep []))
         <$> text ""
 
-emitGroupFieldAccessor commonFields f = do
+emitGroupFieldAccessor typename commonFields f = do
   accs <- mapM emitFieldAccessor (commonFields ++ [f])
-  return $ txCall ((text (fieldCtorName f)) : accs)
+  return $ txCall ((text (fieldCtorName typename f)) : accs)
 
 emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
       let offset = fromIntegral w
-      return $ extractPtr t offset <+> text "{-" <+> text (show t) <+> text "-}"
+      return $ extractPtr f (show t) t offset <+> text "{-" <+> text (show t) <+> text "-}"
 
     KindData -> do
       let offset = fromIntegral w * byteSizeOfType t
@@ -292,27 +303,32 @@ extractData t offset =
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
     _           -> accessor
 
-extractPtrFunc :: Type_ -> Doc
-extractPtrFunc t =
-   case t of
+extractPtrFunc :: Field -> Type_ -> Doc
+extractPtrFunc f t =
+   let wrapper d = if isFieldOptional f
+                     then text "_mkMaybe" <+> d
+                     else                     d
+   in wrapper $ case t of
      Type_Text        -> text "unStrObj"
-     Type_Data        -> error "xPF Data"
+     Type_Data        -> text "unBytes"
      Type_List      x -> error $ "xPF List of " ++ show x
      Type_Struct    w -> text "mk_struct_" <> text (show w)
      Type_Interface _ -> error "xPF Interface"
      Type_Object      -> error "xPF Object"
      Type_Void        -> text "mk_void"
+     Type_Bool        -> text "mk_Bool"
+     Type_UInt64      -> text "mk_Word64"
      _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
 
-extractPtr :: Type_ -> Int -> Doc
-extractPtr t offset =
-  let ptr = text "(ptrs !!" <+> text (show offset) <+> text ")" in
+extractPtr :: Field -> String -> Type_ -> Int -> Doc
+extractPtr f msg t offset =
+  let ptr = srCall ["lookupPointer", show msg, "ptrs", show offset] in
   parens $
     case t of
-     Type_Text        -> extractPtrFunc t <+> ptr
-     Type_Data        -> text "<unsupported extractPtr type:" <+> text (show t)
-     Type_List      x -> text "mapL \"xP\"" <+> extractPtrFunc x <+> ptr
-     Type_Struct    _ -> extractPtrFunc t <+> ptr
+     Type_Text        -> extractPtrFunc f t <+> ptr
+     Type_Data        -> extractPtrFunc f t <+> ptr
+     Type_List      x -> text ("mapL \"" ++ show x ++ "\"") <+> extractPtrFunc f x <+> ptr
+     Type_Struct    _ -> extractPtrFunc f t <+> ptr
      Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
@@ -371,16 +387,16 @@ computeDataArms _  na@(NodeAnnotation {}) = do return []
 computeDataArms nm ns@(NodeStruct {}) = do
     if nodeStruct_discriminantCount ns /= 0
       then do
-        let indiscriminantFields =    [f | f <- nodeStruct_fields ns, fieldDiscriminant f == 0xffff]
-        arms <- mapM caseArmOfFieldGG [f | f <- nodeStruct_fields ns, fieldDiscriminant f /= 0xffff]
-        prependFields indiscriminantFields arms
+        let indiscriminantFields =         [f | f <- nodeStruct_fields ns, fieldDiscriminant f == 0xffff]
+        arms <- mapM (caseArmOfFieldGG nm) [f | f <- nodeStruct_fields ns, fieldDiscriminant f /= 0xffff]
+        prependFields nm indiscriminantFields arms
       else do
-        fields <- mapM caseArmOfFieldNG (nodeStruct_fields ns)
+        fields <- mapM (caseArmOfFieldNG nm) (nodeStruct_fields ns)
         return [(text nm, fields)]
 
-prependFields fields arms = do
+prependFields typename fields arms = do
   let doPrependFields (ctor, params) = do
-         fieldparams <- mapM caseArmOfFieldNG fields
+         fieldparams <- mapM (caseArmOfFieldNG typename) fields
          return (ctor, fieldparams ++ params)
   mapM doPrependFields arms
 
@@ -389,17 +405,20 @@ armCaseOfEnum e = (armNameOfEnum e, [])
 
 armNameOfEnum e = text (capitalizeFirstLetter $ legalizeIdent $ enumerantName e)
 
-caseArmOfFieldGG f = do
-    ty <- cgHS (fieldUnion f)
-    return $ (text (fieldCtorName f), [text (fieldUnCtorName f) <+> text "::" <+> ty])
+caseArmOfFieldGG typename f = do
+    ty <- cgFieldUnion f (fieldUnion f)
+    return $ (text (fieldCtorName typename f)
+             ,[text (fieldUnCtorName typename f) <+> text "::" <+> strictField ty])
 
-caseArmOfFieldNG f = do
-    ty <- cgHS $ fieldUnion f
-    return $ (text (fieldName f) <+> text "::" <+> ty)
+caseArmOfFieldNG typename f = do
+    ty <- cgFieldUnion f (fieldUnion f)
+    return $ (text (fieldName typename f) <+> text "::" <+> strictField ty)
 
--- Example: for a field "foo", fieldCtorName would be "Foo" and fieldUnCtorName would be "unFoo"
-fieldCtorName f = capitalizeFirstLetter $ fieldName f
-fieldUnCtorName f = "un" ++ fieldCtorName f
+strictField doc = text "!" <> doc
+
+-- Example: for a field "foo" of type Ty, fieldCtorName would be "Ty_foo" and fieldUnCtorName would be "unTy_foo"
+fieldCtorName   typename f = capitalizeFirstLetter $ fieldName typename f
+fieldUnCtorName typename f = "un" ++ fieldCtorName typename f
 
 capitalizeFirstLetter [] = []
 capitalizeFirstLetter (h:t) = toUpper h : t
@@ -408,12 +427,12 @@ legalizeIdent "type" = "type_"
 legalizeIdent "id"   = "id_"
 legalizeIdent str = str
 
-instance CGHS FieldUnion where
-  cgHS (FieldSlot _ t _) = do cgHS t
-  cgHS (FieldGroup w) = do liftM text (lookupId w)
-
-instance CGHS Type_ where
-  cgHS type_ =
+cgFieldUnion f (FieldGroup w)    = do liftM text (lookupId w)
+cgFieldUnion f (FieldSlot _ t _) = do ty <- cgFieldSlotType t
+                                      if isFieldOptional f
+                                        then return $ parens $ text "StrictMaybe" <+> ty
+                                        else return ty
+cgFieldSlotType type_ =
     case type_ of
       Type_Void        -> return $ text "()"
       Type_Bool        -> return $ text "Bool"
@@ -429,7 +448,7 @@ instance CGHS Type_ where
       Type_Float64     -> return $ text "Double"
       Type_Text        -> return $ text "String"
       Type_Data        -> return $ text "ByteString"
-      Type_List      t -> do tx <- cgHS t
+      Type_List      t -> do tx <- cgFieldSlotType t
                              return $ text "[" <> tx <> text "]"
       Type_Enum      w -> liftM text (lookupId w)
       Type_Struct    w -> liftM text (lookupId w)
@@ -573,9 +592,19 @@ data Field = Field {
     , fieldDiscriminant :: Word16
     , fieldUnion :: FieldUnion
     , fieldOrdinal :: FieldOrdinal
+    , fieldAnnotations :: [Annotation]
 } deriving Show
 
-fieldName f = legalizeIdent $ fieldName_ f
+data Annotation = Annotation {
+      annotationId :: Word64
+    , annotationValue :: Value
+} deriving Show
+
+isOptionalAnnotation (Annotation id _) = id == 0xfdd8d84c51405f88
+
+isFieldOptional f = any isOptionalAnnotation (fieldAnnotations f)
+
+fieldName typename f = fieldName_ f ++ "_of_" ++ typename
 
 data FieldUnion =
      FieldSlot  Word32 Type_ Value
@@ -675,6 +704,7 @@ kindOfType t = case t of
 mkCodeGeneratorRequest :: Object -> CodeGeneratorRequest
 mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles]) =
   CodeGeneratorRequest (mapL "cgr" mkNode nodes) (mapL "mkcg" mkRequestedFile reqfiles)
+mkCodeGeneratorRequest other = error $ "mkCodeGeneratorRequest $ " ++ show other
 
 mkRequestedFile (StructObj bs [name, _imports]) = RequestedFile id (unStrObj name)
   where id = at bs64 0 bs
@@ -718,7 +748,7 @@ mkNode          (StructObj bs
                         v -> error $ "Unknown Node discriminant:" ++ show v
 
 mkField  (StructObj bs (name:annotations:rest)) =
-  Field (unStrObj name) codeOrder discriminantValue t1 explicit
+  Field (unStrObj name) codeOrder discriminantValue t1 explicit (mapL "annots" mkAnnotation annotations)
     where codeOrder = at bs16 0 bs
           discriminantValue = (at bs16 2 bs) `xor` (65535 :: Word16)
           which = at bs16 8 bs
@@ -791,6 +821,10 @@ mkNestedNode (StructObj bs [name]) = NestedNode (unStrObj name) (at bs64 0 bs)
 
 mkEnumerant (StructObj bs (name:rest)) =
   Enumerant (unStrObj name) (at bs16 0 bs)
+
+mkAnnotation (StructObj bs (value:rest)) =
+  Annotation (at bs64 0 bs)
+             (mkValue value)
 
 --------------------------------------------------------------------
 
