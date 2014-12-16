@@ -32,12 +32,12 @@ main = do
   let segments@(seg:_) = splitSegments rawbytes
   let obj = parseSegment seg segments
   let cgr = mkCodeGeneratorRequest obj
+  let ?tgt = targetHaskell
   let hs_code_doc = evalState (cgCodeGeneratorRequest cgr)
                               (CG_State Map.empty Map.empty)
   --putStrLn $ "obj is:"
   --putDoc $ pretty obj <> line
   --putDoc $ hs_code_doc
-  let ?tgt = targetHaskell
   modularizeAndPutDocToFile hs_code_doc (rfName ((cgrRequestedFiles cgr) !! 0))
 
 ------------------------------------------------------------
@@ -56,25 +56,78 @@ putDocToFile d f = do
   withFile f WriteMode (\h -> hPutDocWide h d)
 ------------------------------------------------------------
 
+-- {{{ Explicit dictionary-passing, encoded using a
+--     dynamically-scoped/implicit record parameter.
+--
+-- I think (?) that later versions of GHC could be convinced
+-- to generate the appropriate dictionary-passing code
+-- by using NullaryTypeClasses and OverlappingInstances,
+-- but I'd like to keep compatibility with GHC 7.6 for now.
+
+-- These functions encapsulate vtable lookup.
 targetHeader :: (?tgt::TargetLanguage) => String -> Doc
 targetHeader   = _targetHeader   ?tgt
 
+-- It would be nice if we could just say
+--    targetHeader = _targetHeader (?tgt::TargetLanguage)
+-- and avoid duplicating the types of the record fields.
+-- Oh well.
+
 targetFilename :: (?tgt::TargetLanguage) => String -> String
 targetFilename = _targetFilename ?tgt
-
 targetCall :: (?tgt::TargetLanguage) => [Doc] -> Doc
 targetCall   = _targetCall ?tgt
+targetAtomCall :: (?tgt::TargetLanguage) => [Doc] -> Doc
+targetAtomCall   = _targetCall ?tgt
+match :: (?tgt::TargetLanguage) => String -> [(Doc, Doc)] -> Doc
+match = _targetMatch ?tgt
+doblock :: (?tgt::TargetLanguage) => [Doc] -> Doc
+doblock = _targetDoblock ?tgt
+doerror :: (?tgt::TargetLanguage) => String -> Doc
+doerror = _targetDoerror ?tgt
+ifthen :: (?tgt::TargetLanguage) => Doc -> Doc -> Doc -> Doc
+ifthen = _targetIfthen ?tgt
+comment :: (?tgt::TargetLanguage) => Doc -> Doc
+comment = _targetMultiLineComment ?tgt
+letbinds :: (?tgt::TargetLanguage) => [(String, Doc)] -> Doc
+letbinds = _targetLetbinds ?tgt
+fnDefinition :: (?tgt::TargetLanguage) => Doc -> [Doc] -> [Doc] -> Doc -> Doc -> Doc
+fnDefinition = _targetFnDefinition ?tgt
+emitAdd :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitAdd = _targetEmitAdd ?tgt
+emitMul :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitMul = _targetEmitMul ?tgt
+emitListLength :: (?tgt::TargetLanguage) => Doc -> Doc
+emitListLength = _targetEmitListLength ?tgt
+emitIO :: (?tgt::TargetLanguage) => String -> Doc
+emitIO = _targetEmitIO ?tgt
 
 data TargetLanguage = TargetLanguage {
     _targetHeader   :: String -> Doc
   , _targetFilename :: String -> String
   , _targetCall     :: [Doc]  -> Doc
+  , _targetAtomCall :: [Doc]  -> Doc
+  , _targetDoblock  :: [Doc]  -> Doc
+  , _targetDoerror  :: String -> Doc
+  , _targetMatch    :: String -> [(Doc, Doc)] -> Doc
+  , _targetIfthen   :: Doc -> Doc -> Doc -> Doc
+  , _targetMultiLineComment :: Doc -> Doc
+  , _targetLetbinds         :: [(String, Doc)] -> Doc
+  , _targetFnDefinition     :: Doc -> [Doc] -> [Doc] -> Doc -> Doc -> Doc
+  , _targetEmitAdd          :: String -> String -> Doc
+  , _targetEmitMul          :: String -> String -> Doc
+  , _targetEmitListLength   :: Doc    -> Doc
+  , _targetEmitIO           :: String -> Doc
 }
+-- }}}
 
+-- {{{ Encapsulation of Haskell syntax
 targetHaskell = TargetLanguage
-                  hsTargetHeader
-                  hsTargetFilename
-                  hsTargetCall
+                  hsTargetHeader hsTargetFilename hsTargetCall
+                  hsAtomCall hsDoblock hsDoerror hsMatch
+                  hsIfthen hsMultiLineComment
+                  hsLetbinds hsFnDefinition hsEmitAdd
+                  hsEmitMul hsEmitListLength hsEmitIO
   where
     hsTargetFilename protoname = moduleNameOf protoname ++ ".hs"
     hsTargetHeader   protoname = vcat $
@@ -86,7 +139,38 @@ targetHaskell = TargetLanguage
                           , text "import Data.Word"
                           , text "import Data.Int"
                           ]
-    hsTargetCall (doc:docs) = parens $ doc <+> align (vsep docs)
+    hsTargetCall (callee:docs) = group $ parens (callee <+> align (vsep docs))
+    hsDoblock stmts = text "do" <$> indent 2 (vcat stmts)
+    hsDoerror str   = text "error $" <+> text (show str)
+    hsMatch var arms =
+         align $  text "case" <+> text var <+> text "of"
+              <$> indent 2 (vcat [pat <+> text "->" <+> body | (pat, body) <- arms])
+    hsIfthen cnd bdy elz = parens (text "if" <+> cnd
+                              <$> align (vsep [text "then" <+> bdy
+                                              ,text "else" <+> elz]))
+    hsAtomCall (callee:txts) = parens (hsep (callee:txts))
+
+    hsMultiLineComment doc = group $ vsep [text "{-", doc, text "-}"]
+
+    hsLetbinds :: [(String, Doc)] -> Doc
+    hsLetbinds bindings = vcat [text "let !" <+> text name <+> text "=" <+> body
+                               | (name, body) <- bindings]
+
+    hsEmitAdd s1 s2 = hsTargetCall [text s1, text "`plusWord64`", text s2]
+    hsEmitMul s1 s2 = hsTargetCall [text s1, text "`mulWord64`",  text s2]
+    hsEmitListLength obj = hsTargetCall [text "fromIntegral", hsTargetCall [text "length", obj]]
+    hsEmitIO str = text $ "IO " ++ str
+
+    hsFnDefinition name args argtypes retty body =
+      let defn = name <+> hsep args <+> text "=" <$> indent 2 body <$> text "" in
+      let decl = name <+> text "::" <+> encloseSep empty empty (text " -> ") (argtypes ++ [retty]) in
+      case argtypes of
+        [] ->          defn
+        _  -> decl <$> defn
+--- }}}
+
+txCall txts = targetCall txts
+srCall strs = targetCall (map text strs)
 
 data CG_State =
      CG_State (Map Word64 String)
@@ -94,7 +178,7 @@ data CG_State =
 
 type CG t = State CG_State t
 
-cgCodeGeneratorRequest :: CodeGeneratorRequest -> CG Doc
+cgCodeGeneratorRequest :: (?tgt::TargetLanguage) => CodeGeneratorRequest -> CG Doc
 cgCodeGeneratorRequest cgr = do
     -- Build the mapping of node ids to type names for later pretty-printing.
     mapM_ denoteNodeAttributes (cgrNodes cgr)
@@ -147,44 +231,6 @@ helperForStructSerializer nodeid = "sr_struct_helper_" ++ show nodeid
 quoted d = squote <> d <> squote
 quotedStr s = quoted (text s)
 
--- {{{ Haskell syntax details
-doerror str = text "error $" <+> text (show str)
-
-ifthen cnd bdy elz = parens (text "if" <+> cnd
-                              <$> align (vsep [text "then" <+> bdy
-                                              ,text "else" <+> elz]))
-
-match var arms =
- align $ text "case" <+> text var <+> text "of"
-      <$> indent 2 (vcat [pat <+> text "->" <+> body | (pat, body) <- arms])
-
-doblock stmts = text "do" <$> indent 2 (vcat stmts)
-
-srCall strs = txCall (map text strs)
-txCall (callee:txts) = group $ parens (callee <+> align (vsep txts))
-atomCall (callee:txts) = parens (hsep (callee:txts))
-
-multiLineComment doc = vsep [text "{-", doc, text "-}"]
-atomicComment doc = text "{-" <+> doc <+> text "-}"
-lineComment doc = text "--" <+> doc
-
-letbinds :: [(String, Doc)] -> Doc
-letbinds bindings = vcat [text "let !" <+> text name <+> text "=" <+> body
-                         | (name, body) <- bindings]
-
-emitAdd s1 s2 = srCall [s1, "`plusWord64`", s2]
-emitMul s1 s2 = srCall [s1, "`mulWord64`",  s2]
-emitListLength obj = txCall [text "fromIntegral", srCall ["length", obj]]
-emitIO str = "IO " ++ str
-
-fnDefinition name args argtypes retty body =
-  let defn = name <+> hsep args <+> text "=" <$> indent 2 body <$> text "" in
-  let decl = name <+> text "::" <+> encloseSep empty empty (text " -> ") (argtypes ++ [retty]) in
-  case argtypes of
-    [] ->          defn
-    _  -> decl <$> defn
--- }}}
-
 instance Pretty Word16 where pretty w = text (show w)
 instance Pretty Word32 where pretty w = pretty (show w)
 instance Pretty Type_  where pretty w = pretty (show w)
@@ -205,7 +251,7 @@ serializerForFieldType f t =
 emitFieldSerializer typename f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
   (txCall [serializerForFieldType f Type_Bool, text "rab", srCall [getFieldAccessor typename f, "obj"],
            text "data_off", pretty offsetInBits])
-     <+> lineComment (text "serialize bool field" <+> quotedStr (fieldName_ f))
+     <+> comment (text "serialize bool field" <+> quotedStr (fieldName_ f))
 
 emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
   let offsetInBytes = fromIntegral w * byteSizeOfType t in
@@ -217,13 +263,13 @@ emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
     KindData ->
       txCall [serializerForFieldType f t, text "rab", srCall [getFieldAccessor typename f, "obj"],
               (emitAdd "data_off" (show offsetInBytes))]
-    ) <+> lineComment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
+    ) <+> comment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
 
 emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
   txCall [serializerForGroup w,
           text "rab", srCall [getFieldAccessor typename f, "obj"],
           text "nextoffset", text "data_off", text "ptrs_off"]
-    <+> lineComment (text $ "serialize group '" ++ fieldName_ f ++ "'")
+    <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node == 0 = do
   let sizedata = nodeStruct_dataWordCount node
@@ -238,9 +284,9 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                      (doblock [letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))]
                               ,txCall (splitArgs $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
-                                            show (atomCall [text "delta_in_words", text "data_off",
-                                                            emitAdd "ptr_off" "8"])]])
-    <$> lineComment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
+                                            show (txCall [text "delta_in_words", text "data_off",
+                                                          emitAdd "ptr_off" "8"])]])
+    <$> comment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
     <$> fnDefinition (text (helperForStructSerializer nodeid))
                      (splitArgs "obj rab data_off nextoffset") noArgTys noRetTy
                      (doblock [
@@ -264,9 +310,9 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
          (doblock [
             case nodeStruct_preferredListEncoding node of
              7 ->  letbinds [("objsize", text $ show (size * 8) ++ " :: Word64")
-                            ,("num_elts", emitListLength "objs")
+                            ,("num_elts", emitListLength $ text "objs")
                             ,("totalsize", emitMul "objsize" "num_elts")
-                            ,("target_off", emitAdd "data_off" "8" <+> lineComment (text "accounting for tag word"))
+                            ,("target_off", emitAdd "data_off" "8" <+> comment (text "accounting for tag word"))
                             ]
                    <$> srCall ["sr_composite_list_helper", "rab", "objsize", "target_off", 
                                  "(target_off + totalsize)", "objs", helperForStructSerializer nodeid]
@@ -320,12 +366,12 @@ emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
                        ,txCall (splitArgs "rabWriteWord16 rab offset value")])
 
 emitNodeUnionSerializer node dname nodeid = do
-  return $ multiLineComment $ string (show (dname, nodeid, node))
+  return $ comment $ string (show (dname, nodeid, node))
 -----
 
 noArgTys = []
 noRetTy = empty
-retTy str = text str
+retTy d = d
 
 splitArgs args = map text $ split " " args
 
@@ -339,7 +385,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
   let discoffb = nodeStruct_discriminantOffset node * 2
   let args = [text "obj"]
   return $  fnDefinition (text $ "mk" ++ dname) args noArgTys noRetTy (txCall [fnname, text "obj"])
-        <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy dname)
+        <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy $ text dname)
                       (ifthen (srCall ["isDefaultObj", "obj"])
                          (doerror $ "Unset value in non-optional field of type " ++ show dname)
                          (match (show (extractData Type_UInt16 discoffb))
@@ -349,16 +395,16 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
   let fnname = makerForType (Type_Struct nodeid)
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
-  return $  fnDefinition (text $ "mk" ++ dname) [text "obj"] [text "Object"] (retTy dname)
+  return $  fnDefinition (text $ "mk" ++ dname) [text "obj"] [text "Object"] (retTy $ text dname)
                          (txCall [fnname, text "obj"])
-        <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy dname)
+        <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy $ text dname)
                          (ifthen (srCall ["isDefaultObj", "obj"])
                            (doerror $ "Unset value in non-optional field of type " ++ show dname)
                            (doblock [txCall (text dname:fieldAccessors)]))
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
-  return $  fnDefinition (text fnname) [text "wx"] [text "Word16"] (retTy dname)
+  return $  fnDefinition (text fnname) [text "wx"] [text "Word16"] (retTy $ text dname)
                          (match "wx"
                             [(text (show (enumerantOrder en))
                              ,text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en))
@@ -380,16 +426,16 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
       let offset = fromIntegral w
-      return $ extractPtr f (show t) t offset <+> atomicComment (text (show t))
+      return $ extractPtr f (show t) t offset <+> comment (text (show t))
 
     KindData -> do
       let offset = fromIntegral w * byteSizeOfType t
-      return $ extractData t offset <+> atomicComment (text (show t))
+      return $ extractData t offset <+> comment (text (show t))
 
 emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
   return $ txCall [makerForType (Type_Struct w), text "obj"]
 
-extractData :: Show num => Type_ -> num -> Doc
+extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
   let accessor = srCall ["at", accessorNameForType t, show offset, "bs"] in
   case t of
@@ -414,7 +460,7 @@ extractPtrFunc f t =
      Type_UInt64      -> text "mk_Word64"
      _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
 
-extractPtr :: Field -> String -> Type_ -> Int -> Doc
+extractPtr :: (?tgt::TargetLanguage) => Field -> String -> Type_ -> Int -> Doc
 extractPtr f msg t offset =
   let ptr = srCall ["lookupPointer", show msg, "ptrs", show offset] in
   parens $
@@ -465,11 +511,11 @@ denoteNodeAttributes node = do
 denoteNodeId node = do
   denoteId (nodeId node) (nodeDisplayName node)
 
-cgNode :: Node -> CG Doc
+cgNode :: (?tgt::TargetLanguage) => Node -> CG Doc
 cgNode node = do
     arms <- computeDataArms (nodeDisplayName node) (nodeUnion node)
     return $ formatDataDecl (nodeDisplayName node) (nodeId node) arms
-          <$> multiLineComment (string (show node))
+          <$> comment (string (show node))
 
 computeDataArms :: String -> NodeUnion -> CG [(Doc, [Doc])]
 computeDataArms _  NodeFile = return []
@@ -549,7 +595,7 @@ cgFieldSlotType type_ =
       Type_Object      -> return $ text "<...object...>"
 
 formatDataDecl name nodeid arms =
-      lineComment (pretty nodeid)
+      comment (pretty nodeid)
   <$> text "data" <+> text name <+> text "="
         <$> indent 4 (cases (map formatDataArm arms)
                       <$> text "deriving Show")
@@ -606,25 +652,4 @@ lookupListEltSizeTag w = do
   return $ case Map.lookup w m of
               Nothing -> error $ "Unknown list elt size for " ++ show w
               Just v  -> v
-
-listEltSizeTag t = case t of
-     Type_Void        -> return 0
-     Type_Bool        -> return 1
-     Type_Int8        -> return 2
-     Type_Int16       -> return 3
-     Type_Int32       -> return 4
-     Type_Int64       -> return 5
-     Type_UInt8       -> return 2
-     Type_UInt16      -> return 3
-     Type_UInt32      -> return 4
-     Type_UInt64      -> return 5
-     Type_Float32     -> return 4
-     Type_Float64     -> return 5
-     Type_Text        -> return 6
-     Type_Data        -> return 6
-     Type_List      _ -> return 6
-     Type_Enum      _ -> return 3 -- or composite?
-     Type_Struct    w -> lookupListEltSizeTag w
-     Type_Interface _ -> error $ "listEltSizeTag Interface"
-     Type_Object      -> error $ "listEltSizeTag AnyPointer"
 
