@@ -2,7 +2,7 @@
 
 # Reads a compiled/serialized cap'n'proto schema file,
 # and generates the corresponding code.
-runhaskell Main.hs || exit 1
+runhaskell Main.hs < testdata/test2.schema.bin || exit 1
 
 # Reads a serialized cap'n'proto message and serializes
 # it back out, using the above-generated code.
