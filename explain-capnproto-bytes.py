@@ -26,7 +26,7 @@ def main():
 
         n = n + 1
 
-        m = re.match(r".(\d{7}) ((?: [0-9a-f]{2})+)", line)
+        m = re.match(r".?(\d{7}) ((?: [0-9a-f]{2})+)", line)
         try:
           offset_bytes = int(m.group(1), 16)
           offset_words = offset_bytes / 8
