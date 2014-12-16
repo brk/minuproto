@@ -102,6 +102,12 @@ bs1b !offset !bs =
 
 isEven n = (n `mod` 2) == 0
 
+plusWord64 :: Word64 -> Word64 -> Word64
+plusWord64 = (+)
+
+mulWord64 :: Word64 -> Word64 -> Word64
+mulWord64 = (*)
+
 newtype WordOffset = WordOffset Int64 deriving (Show, Eq, Ord)
 newtype ByteOffset = ByteOffset Int64 deriving (Show, Eq, Ord)
 

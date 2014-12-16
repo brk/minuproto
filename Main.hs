@@ -168,12 +168,17 @@ multiLineComment doc = vsep [text "{-", doc, text "-}"]
 atomicComment doc = text "{-" <+> doc <+> text "-}"
 lineComment doc = text "--" <+> doc
 
-emitListIndex nm off = atomCall $ map text ["(!!)", nm, show off]
+letbinds :: [(String, Doc)] -> Doc
+letbinds bindings = vcat [text "let !" <+> text name <+> text "=" <+> body
+                         | (name, body) <- bindings]
 
-emitAdd s1 s2 = group $ srCall [s1, "+", s2]
+emitAdd s1 s2 = srCall [s1, "`plusWord64`", s2]
+emitMul s1 s2 = srCall [s1, "`mulWord64`",  s2]
+emitListLength obj = txCall [text "fromIntegral", srCall ["length", obj]]
+emitIO str = "IO " ++ str
 
 fnDefinition name args argtypes retty body =
-  let defn = name <+> hsep args <+> text "=" <+> body <$> text "" in
+  let defn = name <+> hsep args <+> text "=" <$> indent 2 body <$> text "" in
   let decl = name <+> text "::" <+> encloseSep empty empty (text " -> ") (argtypes ++ [retty]) in
   case argtypes of
     [] ->          defn
@@ -211,7 +216,7 @@ emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
       <$> text "nextoffset <- updateNextOffset rab nextoffset ; return ()"
     KindData ->
       txCall [serializerForFieldType f t, text "rab", srCall [getFieldAccessor typename f, "obj"],
-              parens (text ("data_off + " ++ show offsetInBytes))]
+              (emitAdd "data_off" (show offsetInBytes))]
     ) <+> lineComment (text "serialize field" <+> quotedStr (fieldName_ f) <+> pretty w <+> text "*" <+> pretty (byteSizeOfType t) <+> pretty t)
 
 emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
@@ -226,11 +231,11 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let fnname   = serializerForType (Type_Struct nodeid)
   -- data fields first, then pointer fields
   return $
-        fnDefinition (text $ "sr" ++ dname) [text "obj"] [text dname] (retTy "IO ByteString")
+        fnDefinition (text $ "sr" ++ dname) [text "obj"] [text dname] (retTy (emitIO "ByteString"))
                      (txCall [text "serializeWith", text "obj", fnname])
     <$> fnDefinition fnname (splitArgs "obj rab ptr_off data_off")
-                     (map text [dname, "ResizableArrayBuilder", "Word64", "Word64"]) (retTy "IO ()")
-                     (doblock [text "let nextoffset = data_off +" <+> text (show (8 * size))
+                     (map text [dname, "ResizableArrayBuilder", "Word64", "Word64"]) (retTy (emitIO "()"))
+                     (doblock [letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))]
                               ,txCall (splitArgs $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
                                             show (atomCall [text "delta_in_words", text "data_off",
@@ -239,13 +244,14 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
     <$> fnDefinition (text (helperForStructSerializer nodeid))
                      (splitArgs "obj rab data_off nextoffset") noArgTys noRetTy
                      (doblock [
-                          text "let ptrs_off =" <+> emitAdd "data_off" (show (8 * sizedata))
+                          letbinds [("ptrs_off", emitAdd "data_off" (show (8 * sizedata)))]
                          ,if nodeStruct_discriminantCount node == 0
                             then vcat (map (emitFieldSerializer dname) (nodeStruct_fields node))
                             else
                                 let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff] in
-                                let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff] in
-                                text ("let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))")
+                                let discriminatedFields  = [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff] in
+                                letbinds [("absDiscrimOff", emitAdd "data_off"
+                                                                (show $ 2 * nodeStruct_discriminantOffset node))]
                             <$> match "obj" [(text (fieldCtorName dname f) <+> text "{}"
                                               ,doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
                                                         ,emitFieldSerializer dname f] ++
@@ -254,14 +260,14 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                        ])
     <$> fnDefinition (text ("sr_list_of_" ++ show nodeid))
                      (splitArgs "objs rab ptr_off data_off")
-                     (splitArgs ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy "IO ()")
+                     (splitArgs ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy (emitIO "()"))
          (doblock [
             case nodeStruct_preferredListEncoding node of
-             7 ->
-                       text ("let !objsize = " ++ show (size * 8) ++ " :: Word64")
-                   <$> text  "let !num_elts = fromIntegral $ length objs"
-                   <$> text  "let !totalsize = objsize * num_elts"
-                   <$> text  "let !target_off = data_off + 8" <+> lineComment (text "accounting for tag word")
+             7 ->  letbinds [("objsize", text $ show (size * 8) ++ " :: Word64")
+                            ,("num_elts", emitListLength "objs")
+                            ,("totalsize", emitMul "objsize" "num_elts")
+                            ,("target_off", emitAdd "data_off" "8" <+> lineComment (text "accounting for tag word"))
+                            ]
                    <$> srCall ["sr_composite_list_helper", "rab", "objsize", "target_off", 
                                  "(target_off + totalsize)", "objs", helperForStructSerializer nodeid]
                    <$> srCall ["sr_ptr_struct", "rab", "data_off", show sizedata, show (size - sizedata), "num_elts"]
@@ -272,13 +278,14 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
              siz ->
                        --text ("let objsize = " ++ show ((byteSizeOfListEncoding siz) * 8) ++ " :: Word64")
                        text  "-- TODO test this..."
-                   <$> text  "let !objsize = " <> text (show (byteSizeOfListEncoding siz))
-                   <$> text  "let !num_elts = " <> srCall ["objsLength", "objs"]
-                   <$> text  "let !totalsize =" <+> txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"]
-                   <$> srCall ["sr_composite_list_helper", "rab", "objsize", "data_off", 
-                                 "(data_off + totalsize)", "objs", helperForStructSerializer nodeid]
+                   <$> letbinds [("objsize", text (show (byteSizeOfListEncoding siz)))
+                                ,("num_elts", srCall ["objsLength", "objs"])
+                                ,("totalsize", txCall [text "sr_total_size_for", pretty (show siz), pretty (show $ size * 8), text "num_elts"])
+                                ]
+                   <$> txCall [text "sr_composite_list_helper", text "rab", text "objsize", text "data_off",
+                                 emitAdd "data_off" "totalsize", text "objs", text (helperForStructSerializer nodeid)]
                    <$> txCall ((map text ["sr_ptr_list", "rab", "ptr_off", show siz, "num_elts"])
-                                        ++ [srCall ["delta_in_words", "data_off", "(ptr_off + 8)"]])])
+                                        ++ [txCall [text "delta_in_words", text "data_off", emitAdd "ptr_off" "8"]])])
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node == 0 = do
   let sizedata = nodeStruct_dataWordCount node
@@ -286,7 +293,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   return $
     fnDefinition (serializerForGroup nodeid)
                  (map text ["!rab", "!obj", "!nextoffset", "!data_off", "!ptrs_off"]) noArgTys noRetTy
-              (doblock $ (text "let !nextoffset = data_off +" <+> text (show (8 * size)))
+              (doblock $ (letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))])
                          :map (emitFieldSerializer dname) (nodeStruct_fields node))
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
@@ -294,7 +301,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
     fnDefinition (serializerForGroup nodeid)
                  (map text ["rab", "obj", "nextoffset", "data_off", "ptrs_off"])
                  noArgTys noRetTy
-                 (doblock [text $ "let absDiscrimOff = (data_off + (2 * " ++ show (nodeStruct_discriminantOffset node) ++ "))"
+                 (doblock [letbinds [("absDiscrimOff", emitAdd "data_off" (show (2 * (nodeStruct_discriminantOffset node))))]
                           ,match "obj" [
                              (text (fieldCtorName dname f) <+> text "{}",
                               doblock [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
@@ -304,12 +311,12 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
 emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
   let fnname = serializerForType (Type_Enum nodeid)
   return $ fnDefinition fnname (splitArgs "!rab !e !offset")
-                        [text "ResizableArrayBuilder", text dname, text "Word64"] (retTy "IO ()")
-              (doblock [text "let !value = " <>
+                        [text "ResizableArrayBuilder", text dname, text "Word64"] (retTy (emitIO "()"))
+              (doblock [letbinds [("value",
                                match "e"
                                 [ (text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
                                   ,pretty (enumerantOrder en))
-                                | en <- nodeEnum_enumerants node]
+                                | en <- nodeEnum_enumerants node])]
                        ,txCall (splitArgs "rabWriteWord16 rab offset value")])
 
 emitNodeUnionSerializer node dname nodeid = do
@@ -351,12 +358,11 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
-  return $  text fnname <+> text "::" <+> text "Word16 -> " <> text dname
-        <$> text fnname <+> text "w" <+> text "="
-        <$> indent 2 (text "case w of")
-        <$> indent 4 (vsep [text (show (enumerantOrder en)) <+> text "->" <+> text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)
+  return $  fnDefinition (text fnname) [text "wx"] [text "Word16"] (retTy dname)
+                         (match "wx"
+                            [(text (show (enumerantOrder en))
+                             ,text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en))
                            | en <- nodeEnum_enumerants node])
-        <$> text ""
 
 emitNodeUnionBuilder other dname _ = do
   let fnname = "mk" ++ dname
