@@ -27,6 +27,9 @@ import Data.ByteString(ByteString)
 import Data.Char(chr, toUpper)
 import Data.List((!!), foldl')
 
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+
 import qualified Data.ByteString.Internal as BS(c2w)
 import qualified Data.ByteString.Lazy.Builder as BD
 import qualified Data.ByteString.Lazy as LBS
@@ -81,6 +84,12 @@ bs64 !bs = let !w0 = at bs32 0 bs in
            let !w1 = at bs32 4 bs in
            let !v = _w64 w1 w0 in
            v
+
+bs8i :: ByteString -> Int8
+bs8i bs = let !v = fromIntegral (bs8 bs) in v
+
+bs16i :: ByteString -> Int16
+bs16i bs = let !v = fromIntegral (bs16 bs) in v
 
 bs32i :: ByteString -> Int32
 bs32i bs = let !v = fromIntegral (bs32 bs) in v
@@ -170,29 +179,58 @@ instance Show Pointer where
 data FlatObj = StructFlat !ByteString ![Pointer]
              | ListFlat   ![FlatObj]
              | StrFlat    !String
+             | BytesFlat  !ByteString
              deriving Show
 
 data Object = StructObj  !ByteString ![Object]
             | ListObj    ![Object]
             | StrObj     !String
+            | BytesObj   !ByteString
             | InvalidObj !String
              deriving Show
 
-dropLastByte str = take (length str - 1) str
-unStrObj (StrObj str) = dropLastByte str
+dropLastChar str =    take (   length str - 1) str
+dropLastByte bs  = BS.take (BS.length bs  - 1) bs
+
+unText :: Object -> (ByteString, ())
+unText (BytesObj bs) = (dropLastByte bs, ()) -- drop last byte
+unText obj = (T.encodeUtf8 (T.pack $ unStrObj obj), ())
+
+unStrObj :: Object -> String
+unStrObj (StrObj str) = dropLastChar str
+unStrObj (BytesObj bs) = T.unpack $ T.decodeUtf8 (dropLastByte bs)
 unStrObj (StructObj bs []) | BS.null bs = ""
 unStrObj other = error $ "unStrObj wasn't expecting " ++ show other
 
+unBytes :: Object -> ByteString
+unBytes (BytesObj bs) = bs
 unBytes obj = error $ "unBytes of " ++ show obj
 
 mk_void :: Object -> ()
 mk_void _ = ()
 
 mk_Bool :: Object -> Bool
+mk_Bool (StrObj "0") = False
+mk_Bool (StrObj "1") = True
 mk_Bool o = error $ "mk_bool: " ++ show o
 
 mk_Word64 :: Object -> Word64
-mk_Word64 o = error $ "mk_Word64: " ++ show o
+mk_Word64 (BytesObj bs) = bs64 bs
+mk_Word32 :: Object -> Word32
+mk_Word32 (BytesObj bs) = bs32 bs
+mk_Word16 :: Object -> Word16
+mk_Word16 (BytesObj bs) = bs16 bs
+mk_Word8 :: Object -> Word8
+mk_Word8 (BytesObj bs) = bs8 bs
+
+mk_Int64 :: Object -> Int64
+mk_Int64 (BytesObj bs) = bs64i bs
+mk_Int32 :: Object -> Int32
+mk_Int32 (BytesObj bs) = bs32i bs
+mk_Int16 :: Object -> Int16
+mk_Int16 (BytesObj bs) = bs16i bs
+mk_Int8 :: Object -> Int8
+mk_Int8 (BytesObj bs) = bs8i bs
 
 instance Pretty Object where
   pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"
@@ -304,16 +342,16 @@ derefListPointer ptr@(ListPtr bs origin off eltsize numelts) segs =
   let !boff = byteOffsetOf off in
   case eltsize of
     LES_Phantom -> ListFlat (replicate (fromIntegral numelts) (StructFlat BS.empty []))
-    LES_Byte1   -> StrFlat  [chr $ fromIntegral $ byte bs (ByteOffset $ boff + n) | n <- zeroto numelts]
-    LES_Byte2   -> ListFlat [StructFlat (slice (8 * unWordOffset off + n) 2 bs)        [] | n <- zeroto numelts]
-    LES_Word    -> ListFlat [StructFlat (sliceWords (unWordOffset off + n) 1 bs)       [] | n <- zeroto numelts]
     LES_Bit     -> ListFlat [StrFlat [charOfBool (readNthBit bs boff n)] | n <- zeroto numelts]
+    LES_Byte1   -> BytesFlat (slice boff numelts bs)
+    LES_Byte2   -> ListFlat [BytesFlat (slice (8 * unWordOffset off + 2 * n) 2 bs) | n <- zeroto numelts]
+    LES_Byte4   -> ListFlat [BytesFlat (slice (8 * unWordOffset off + 4 * n) 4 bs) | n <- zeroto numelts]
+    LES_Word    -> ListFlat [BytesFlat (sliceWords (unWordOffset off + n) 1 bs)    | n <- zeroto numelts]
     LES_Ptr     -> ListFlat [derefUnknownPointer segs (parseUnknownPointerAt "derefListPtr" bs segs
                                                             (off + WordOffset n)) | n <- zeroto numelts]
     LES_Composite dw pw ->
       let offsets = [off + (fromIntegral $ i * (dw + pw)) | i <- zeroto numelts] in
       ListFlat [derefStructPointer (StructPtr bs ("LES_Composite: " ++ show ptr ++ ";" ++ show off') off' dw pw) segs | off' <- offsets]
-    _ -> error $ "can't yet parse list of elts sized " ++ show eltsize
 
 lookupSegment segs idx =
   if idx < length segs
@@ -344,6 +382,7 @@ unflatten 0 _ flat = InvalidObj $ "no gas left for " ++ show flat
 unflatten n segs (StructFlat words ptrs) = StructObj words (map (derefUnknownPointer' (n - 1) segs) ptrs)
 unflatten n segs (ListFlat   flats) =        ListObj       (map (unflatten (n - 1) segs) flats)
 unflatten _ _    (StrFlat    str)   =         StrObj str
+unflatten _ _    (BytesFlat  bs )   =       BytesObj bs
 
 derefUnknownPointer :: [ByteString] -> Pointer -> FlatObj
 derefUnknownPointer segs ptr =
@@ -379,15 +418,48 @@ mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty oth
 
 delta_in_words bo1 bo2 = (bo1 - bo2) `div` 8
 
--- TODO fix these to actually serialize the list elements, not just the pointer to them...
-sr_list_of_Type_UInt64 ints rab ptr_off data_off = do
-  sr_ptr_list rab ptr_off 8 (fromIntegral $ length ints) (delta_in_words data_off (ptr_off + 8))
+sr_list_of_Type_UInt64 vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 5 8 ptr_off data_off sr_Type_UInt64
+sr_list_of_Type_UInt32 vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 4 4 ptr_off data_off sr_Type_UInt32
+sr_list_of_Type_UInt16 vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 3 2 ptr_off data_off sr_Type_UInt16
+sr_list_of_Type_UInt8  vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 2 1 ptr_off data_off sr_Type_UInt8
+sr_list_of_Type_Int64  vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 5 8 ptr_off data_off sr_Type_Int64
+sr_list_of_Type_Int32  vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 4 4 ptr_off data_off sr_Type_Int32
+sr_list_of_Type_Int16  vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 3 2 ptr_off data_off sr_Type_Int16
+sr_list_of_Type_Int8   vals rab ptr_off data_off = sr_list_of_NonPtr vals rab 2 1 ptr_off data_off sr_Type_Int8
+
+sr_list_of_NonPtr vals rab size_tag size_in_bytes ptr_off data_off sr_helper = do
+  sr_ptr_list rab ptr_off size_tag (fromIntegral $ length vals) (delta_in_words data_off (ptr_off + 8))
+  go vals data_off
+    where go [] _ = return ()
+          go (w:rest) !off = do sr_helper rab w off
+                                go rest (off + size_in_bytes)
 
 sr_list_of_Type_Text texts rab ptr_off data_off = do
-  sr_ptr_list rab ptr_off 8 (fromIntegral $ length texts) (delta_in_words data_off (ptr_off + 8))
+  let !num_txt_ptrs = fromIntegral $ length texts
+  sr_ptr_list rab ptr_off 6 num_txt_ptrs (delta_in_words data_off (ptr_off + 8))
+  go texts data_off (data_off + (8 * num_txt_ptrs))
+    where go []           _    _     = return ()
+          go (text:rest) !poff !doff = do nwritten <- sr_Type_Text' text rab poff doff
+                                          go rest (poff + 8) (doff + fromIntegral nwritten)
+
+
+byte_of_bools :: [Bool] -> Word8
+byte_of_bools first8 =
+  fromIntegral $ sum [2^k * (if d then 1 else 0)
+                     | (k,d) <- zip [0..] first8]
+
+bytes_of_bools :: [Bool] -> [Word8]
+bytes_of_bools bools = go bools [] where
+  go bools acc =
+    case splitAt 8 bools of
+      ([],      _)   -> reverse acc
+      (first8, rest) -> go rest (byte_of_bools first8:acc)
 
 sr_list_of_Type_Bool bools rab ptr_off data_off = do
   sr_ptr_list rab ptr_off 1 (fromIntegral $ length bools) (delta_in_words data_off (ptr_off + 8))
+  let byts = bytes_of_bools bools
+  rabWriteBytes rab data_off $ BS.pack $ byts
+  rabPadToAlignment rab 8
 
 sr_list_of_Type_Void voids rab ptr_off data_off = do
   sr_ptr_list rab ptr_off 0 (fromIntegral $ length voids) (delta_in_words data_off (ptr_off + 8))
@@ -404,7 +476,6 @@ sr_Type_Int64  rab val data_off = rabWriteInt64  rab data_off val
 sr_Type_Void :: ResizableArrayBuilder -> () -> Word64 -> IO ()
 sr_Type_Void rab _unit _data_off = return ()
 
--- TODO...
 sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Word64 -> Int -> IO ()
 sr_Type_Bool rab b data_off bit_off = do
   rabWriteBit rab data_off bit_off b
@@ -431,29 +502,44 @@ sr_Maybe sr mb_val rab ptr_off data_off =
 
 debugStr s = if False then putStrLn s else return ()
 
-sr_Type_Text :: String -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
-sr_Type_Text !str !rab !ptr_off !data_off = do
-    o <- foldM (\o c -> do rabWriteWord8 rab o (BS.c2w c)
-                           return (o + 1)) data_off str
-    let num_elts = length str + 1
-    let num_pad_bytes = let excess = num_elts `mod` 8 in
-                         if excess > 0 then 8 - excess else 0
+sr_Type_Text :: (ByteString, ()) -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
+sr_Type_Text !text !rab !ptr_off !data_off = do
+  _ <- sr_Type_Text' text rab  ptr_off  data_off
+  return ()
+
+-- Returns number of *bytes* written, including nul/padding bytes.
+sr_Type_Text' :: (ByteString, ()) -> ResizableArrayBuilder -> Word64 -> Word64 -> IO Int
+sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off = do
+ if BS.null utf8
+   then do rabWriteWord64 rab ptr_off 0
+           return 0
+   else do
+    let !o = data_off + fromIntegral (BS.length utf8)
+    let !num_elts = BS.length utf8 + 1
+    let !num_pad_bytes = let excess = num_elts `mod` 8 in
+                          if excess == 0 then 0 else 8 - excess
     --putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes))
     --putStrLn $ "text ptr is at " ++ show ptr_off ++ " and text data is at " ++ show data_off
     --bp <- rabSize rab
     --putStrLn $ "before padding, nextoffset will be " ++ show bp
     -- always writes at least one byte for nul terminator.
+    rabWriteBytes rab data_off utf8
     mapM_ (\o -> do rabWriteWord8 rab o 0x00) (padbyte_offsets o (fromIntegral num_pad_bytes))
+
     --bp <- rabSize rab
     --putStrLn $ "after padding, nextoffset will be " ++ show bp
     sr_ptr_list rab ptr_off 2 (fromIntegral num_elts) (delta_in_words data_off (ptr_off + 8))
+    return (num_elts + num_pad_bytes)
 
 sr_ptr_list :: ResizableArrayBuilder -> Word64 -> Int -> Word64 -> Word64 -> IO ()
-sr_ptr_list !rab !ptr_off !size_tag !num_elts !delta = do
-  let a_tag = 1
-  debugStr $ "emitting list ptr @ " ++ show ptr_off ++ " with tag/nelts/delta = " ++ show (size_tag, num_elts, delta) ++ " ; " ++ show ((fromIntegral size_tag + fromIntegral num_elts `shiftL` 3) :: Word32)
-  rabWriteWord32 rab  ptr_off      (a_tag + fromIntegral delta `shiftL` 2)
-  rabWriteWord32 rab (ptr_off + 4) (fromIntegral size_tag + fromIntegral num_elts `shiftL` 3)
+sr_ptr_list !rab !ptr_off !size_tag !num_elts_or_words !delta = do
+  --if num_elts_or_words == 0
+  --  then rabWriteWord64 rab  ptr_off 0
+  --  else
+      do let a_tag = 1
+         --putStrLn $ "emitting list ptr @ " ++ show ptr_off ++ " with tag/nelts/delta = " ++ show (size_tag, num_elts, delta) ++ " ; " ++ show ((fromIntegral size_tag + fromIntegral num_elts `shiftL` 3) :: Word32)
+         rabWriteWord32 rab  ptr_off      (a_tag + fromIntegral delta `shiftL` 2)
+         rabWriteWord32 rab (ptr_off + 4) (fromIntegral size_tag + fromIntegral num_elts_or_words `shiftL` 3) -- size in bytes = # words << 3
 
 sr_ptr_struct :: ResizableArrayBuilder -> Word64 -> Word16 -> Word16 -> Word64 -> IO ()
 sr_ptr_struct !rab !ptr_off !sizedata !sizeptrs !delta = do
@@ -487,6 +573,7 @@ serializeWith :: a -> (a -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()) 
 serializeWith obj serializer = do
   rab <- newResizableArrayBuilder
   serializer obj rab 0 8 -- ptr offset, data offset
+  rabPadToAlignment rab 8
   bs <- rabToByteString rab
   return $ frameCapnProtoMessage bs
 

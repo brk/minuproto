@@ -190,7 +190,7 @@ targetHaskell = TargetLanguage
           Type_UInt64      -> return $ text "Word64"
           Type_Float32     -> return $ text "Float"
           Type_Float64     -> return $ text "Double"
-          Type_Text        -> return $ text "String"
+          Type_Text        -> return $ text "(ByteString, ())"
           Type_Data        -> return $ text "ByteString"
           Type_List      t -> liftM (\tx -> text "[" <> tx <> text "]") (hscgFieldSlotType t)
           Type_Enum      w -> liftM text (lookupId w)
@@ -280,7 +280,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                                                         (map (emitFieldSerializer dname) indiscriminantFields))
                                                   | f <- discriminatedFields]
                        ])
-    <$> fnDefinition (text ("sr_list_of_" ++ show nodeid))
+    <$> fnDefinition (serializerForType (Type_List $ Type_Struct nodeid))
                      (splitArgs "objs rab ptr_off data_off")
                      (splitTys ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy (emitIO "()"))
          (doblock [
@@ -288,14 +288,15 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
              7 ->  letbinds [("objsize", text $ show (size * 8) ++ " :: Word64")
                             ,("num_elts", emitListLength $ text "objs")
                             ,("totalsize", emitMul "objsize" "num_elts")
+                            ,("num_words", emitMul (show size) "num_elts")
                             ,("target_off", emitAdd "data_off" "8" <+> comment (text "accounting for tag word"))
                             ]
-                   <$> srCall ["sr_composite_list_helper", "rab", "objsize", "target_off", 
+                   <$> srCall ["sr_composite_list_helper", "rab", "objsize", "target_off",
                                  "(target_off + totalsize)", "objs", helperForStructSerializer nodeid]
                    <$> srCall ["sr_ptr_struct", "rab", "data_off", show sizedata, show (size - sizedata), "num_elts"]
-                   <$> txCall [text "sr_ptr_list", text "rab", text "ptr_off", text "7",
-                                  srCall ["div", "totalsize", "8"],
-                                  srCall ["delta_in_words", "data_off", "(ptr_off + 8)"]]
+                   <$> txCall [text "sr_ptr_list", text "rab", text "ptr_off", text "7", text "num_words",
+                                  txCall [text "delta_in_words", text "data_off",
+                                           emitAdd "ptr_off" "8"]]
              1 -> error $ "Can't yet support serialization of lists of single-bit structs."
              siz ->
                        --text ("let objsize = " ++ show ((byteSizeOfListEncoding siz) * 8) ++ " :: Word64")
@@ -467,7 +468,7 @@ extractPtr f msg t offset =
                                     else                          d
    extractPtrFunc t =
      wrapper $ case t of
-        Type_Text        -> text "unStrObj"
+        Type_Text        -> text "unText"
         Type_Data        -> text "unBytes"
         Type_List      x -> error $ "xPF List of " ++ show x
         Type_Struct    _ -> makerForType t
@@ -476,15 +477,25 @@ extractPtr f msg t offset =
         Type_Void        -> text "mk_void"
         Type_Bool        -> text "mk_Bool"
         Type_UInt64      -> text "mk_Word64"
+        Type_Int64       -> text "mk_Int64"
+        Type_UInt32      -> text "mk_Word32"
+        Type_Int32       -> text "mk_Int32"
+        Type_UInt16      -> text "mk_Word16"
+        Type_Int16       -> text "mk_Int16"
+        Type_UInt8       -> text "mk_Word8"
+        Type_Int8        -> text "mk_Int8"
         _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
 -- }}}
 
 makerForType (Type_Enum   w) = text $ "mk_enum_"   ++ show w
 makerForType (Type_Struct w) = text $ "mk_struct_" ++ show w
-makerForType (Type_List (Type_Struct w)) = text $ "sr_list_of_" ++ show w
-makerForType (Type_List (Type_Enum   w)) = text $ "sr_list_of_" ++ show w
-makerForType (Type_List t) = text $ "sr_list_of_" ++ show t
-makerForType t = text ("sr_" ++ show t)
+makerForType other = error $ "makerForType " ++ show other
+{-
+makerForType (Type_List (Type_Struct w)) = text $ "mk_list_of_" ++ show w
+makerForType (Type_List (Type_Enum   w)) = text $ "mk_list_of_" ++ show w
+makerForType (Type_List t) = text $ "mk_list_of_" ++ show t
+makerForType t = text ("mk_" ++ show t)
+-}
 
 serializerForType (Type_Enum   w) = text $ "sr_enum_"   ++ show w
 serializerForType (Type_Struct w) = text $ "sr_struct_" ++ show w

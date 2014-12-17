@@ -29,6 +29,17 @@ rabToByteString (ResizableArrayBuilder rcap rsiz) = do
                      let !(Addr addr_) = mutableByteArrayContents pba
                      unsafePackAddressLen s addr_
 
+rabPadToAlignment rab align = do
+  sz <- rabSize rab
+  case sz `mod` align of
+    0     -> return ()
+    extra -> -- extra is in range [1..align-1]
+             -- (align - extra) is in range [1..align-1]
+             -- (align - extra) + sz  is a multiple of align
+             -- But we want that to be the length of the byte array,
+             -- so we write to the previous index.
+             rabWriteWord8 rab (fromIntegral $ sz + (align - extra) - 1) 0
+
 rabReadWord8 rab@(ResizableArrayBuilder rcap _rsiz) offset = do
   rabCheckLimit rab offset
   v <- readIORef rcap
@@ -105,7 +116,7 @@ rabWriteInt64 :: ResizableArrayBuilder -> Word64 -> Int64 -> IO ()
 rabWriteInt64 !rab !offset !value = rabWriteWord64 rab offset (fromIntegral value)
 
 rabWriteInt32 :: ResizableArrayBuilder -> Word64 -> Int32 -> IO ()
-rabWriteInt32 !rab !offset !value = rabWriteWord32 rab offset (fromIntegral value)
+rabWriteInt32 !rab !offset !value = do rabWriteWord32 rab offset (fromIntegral value)
 
 rabWriteInt16 :: ResizableArrayBuilder -> Word64 -> Int16 -> IO ()
 rabWriteInt16 !rab !offset !value = rabWriteWord16 rab offset (fromIntegral value)
