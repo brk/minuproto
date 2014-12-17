@@ -163,8 +163,8 @@ targetHaskell = TargetLanguage
     hsLetbinds bindings = vcat [text "let" <+> hsEmitBinder name <+> text "=" <+> body
                                | (name, body) <- bindings]
 
-    hsEmitAdd s1 s2 = hsTargetCall [text s1, text "`plusWord64`", text s2]
-    hsEmitMul s1 s2 = hsTargetCall [text s1, text "`mulWord64`",  text s2]
+    hsEmitAdd s1 s2 = hsTargetCall [text s1, text "`plusOffset`", text s2]
+    hsEmitMul s1 s2 = hsTargetCall [text s1, text "`mulOffset`",  text s2]
     hsEmitListLength obj = hsTargetCall [text "fromIntegral", hsTargetCall [text "length", obj]]
     hsEmitIO str = text $ "IO " ++ str
     hsEmitBinder str = text $ "!" ++ str -- Make all binders strict in generated code!
@@ -202,6 +202,8 @@ targetHaskell = TargetLanguage
 
 txCall txts = targetCall txts
 srCall strs = targetCall (map text strs)
+
+tyOffset = "Int"
 
 data CG_State =
      CG_State (Map Word64 String)
@@ -256,7 +258,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
         fnDefinition (text $ "sr" ++ dname) (splitArgs "obj") [text dname] (retTy (emitIO "ByteString"))
                      (txCall [text "serializeWith", text "obj", fnname])
     <$> fnDefinition fnname (splitArgs "obj rab ptr_off data_off")
-                     (map text [dname, "ResizableArrayBuilder", "Word64", "Word64"]) (retTy (emitIO "()"))
+                     (map text [dname, "ResizableArrayBuilder", tyOffset, tyOffset]) (retTy (emitIO "()"))
                      (doblock [letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))]
                               ,srCall (split " " $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
@@ -282,10 +284,10 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                        ])
     <$> fnDefinition (serializerForType (Type_List $ Type_Struct nodeid))
                      (splitArgs "objs rab ptr_off data_off")
-                     (splitTys ("[" ++ dname ++ "] ResizableArrayBuilder Word64 Word64")) (retTy (emitIO "()"))
+                     (map text ["[" ++ dname ++ "]", "ResizableArrayBuilder", tyOffset, tyOffset]) (retTy (emitIO "()"))
          (doblock [
             case nodeStruct_preferredListEncoding node of
-             7 ->  letbinds [("objsize", text $ show (size * 8) ++ " :: Word64")
+             7 ->  letbinds [("objsize", text $ show (size * 8))
                             ,("num_elts", emitListLength $ text "objs")
                             ,("totalsize", emitMul "objsize" "num_elts")
                             ,("num_words", emitMul (show size) "num_elts")
@@ -334,7 +336,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
 emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
   let fnname = serializerForType (Type_Enum nodeid)
   return $ fnDefinition fnname (splitArgs "rab e offset")
-                        [text "ResizableArrayBuilder", text dname, text "Word64"] (retTy (emitIO "()"))
+                        [text "ResizableArrayBuilder", text dname, text tyOffset] (retTy (emitIO "()"))
               (doblock [letbinds [("value",
                                match "e"
                                 [ (text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en)

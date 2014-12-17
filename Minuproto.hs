@@ -43,12 +43,18 @@ import Debug.Trace(trace)
 
 import Control.Monad.State
 
+---------------------------------------------------------------------
+type Offset = Int
+---------------------------------------------------------------------
+
 data StrictMaybe a = StrictlyNone
                    | StrictlyJust !a
 
 instance Show a => Show (StrictMaybe a) where
   show  StrictlyNone    =  "StrictlyNone"
   show (StrictlyJust v) = "(StrictlyJust " ++ show v ++ ")"
+
+---------------------------------------------------------------------
 
 wordLE :: (Integral a, Integral b, Bits b) => Int -> a -> a -> b
 wordLE !n !a !b = let !x = shift (fromIntegral a) n
@@ -111,11 +117,11 @@ bs1b !offset !bs =
 
 isEven n = (n `mod` 2) == 0
 
-plusWord64 :: Word64 -> Word64 -> Word64
-plusWord64 = (+)
+plusOffset :: Offset -> Offset -> Offset
+plusOffset = (+)
 
-mulWord64 :: Word64 -> Word64 -> Word64
-mulWord64 = (*)
+mulOffset :: Offset -> Offset -> Offset
+mulOffset = (*)
 
 newtype WordOffset = WordOffset Int64 deriving (Show, Eq, Ord)
 newtype ByteOffset = ByteOffset Int64 deriving (Show, Eq, Ord)
@@ -405,7 +411,7 @@ parseBytes rawbytes =
 
 instance Pretty Word64 where pretty w = text (show w)
 
-updateNextOffset :: ResizableArrayBuilder -> Word64 -> IO Word64
+updateNextOffset :: ResizableArrayBuilder -> Offset -> IO Offset
 updateNextOffset rab prevoffset = do
   nextoffset <- rabSize rab
   return $ max prevoffset (fromIntegral nextoffset)
@@ -473,14 +479,14 @@ sr_Type_Int16  rab val data_off = rabWriteInt16  rab data_off val
 sr_Type_Int32  rab val data_off = rabWriteInt32  rab data_off val
 sr_Type_Int64  rab val data_off = rabWriteInt64  rab data_off val
 
-sr_Type_Void :: ResizableArrayBuilder -> () -> Word64 -> IO ()
+sr_Type_Void :: ResizableArrayBuilder -> () -> Offset -> IO ()
 sr_Type_Void rab _unit _data_off = return ()
 
-sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Word64 -> Int -> IO ()
+sr_Type_Bool :: ResizableArrayBuilder -> Bool -> Offset -> Int -> IO ()
 sr_Type_Bool rab b data_off bit_off = do
   rabWriteBit rab data_off bit_off b
 
-sr_Type_Data :: ByteString -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
+sr_Type_Data :: ByteString -> ResizableArrayBuilder -> Offset -> Offset -> IO ()
 sr_Type_Data val rab data_off nextoffset = rabWriteBytes rab data_off val
 
 padbyte_offsets o n = [o.. o + n]
@@ -502,13 +508,13 @@ sr_Maybe sr mb_val rab ptr_off data_off =
 
 debugStr s = if False then putStrLn s else return ()
 
-sr_Type_Text :: (ByteString, ()) -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
+sr_Type_Text :: (ByteString, ()) -> ResizableArrayBuilder -> Offset -> Offset -> IO ()
 sr_Type_Text !text !rab !ptr_off !data_off = do
   _ <- sr_Type_Text' text rab  ptr_off  data_off
   return ()
 
 -- Returns number of *bytes* written, including nul/padding bytes.
-sr_Type_Text' :: (ByteString, ()) -> ResizableArrayBuilder -> Word64 -> Word64 -> IO Int
+sr_Type_Text' :: (ByteString, ()) -> ResizableArrayBuilder -> Offset -> Offset -> IO Int
 sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off = do
  if BS.null utf8
    then do rabWriteWord64 rab ptr_off 0
@@ -531,7 +537,7 @@ sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off = do
     sr_ptr_list rab ptr_off 2 (fromIntegral num_elts) (delta_in_words data_off (ptr_off + 8))
     return (num_elts + num_pad_bytes)
 
-sr_ptr_list :: ResizableArrayBuilder -> Word64 -> Int -> Word64 -> Word64 -> IO ()
+sr_ptr_list :: ResizableArrayBuilder -> Offset -> Int -> Offset -> Offset -> IO ()
 sr_ptr_list !rab !ptr_off !size_tag !num_elts_or_words !delta = do
   --if num_elts_or_words == 0
   --  then rabWriteWord64 rab  ptr_off 0
@@ -541,14 +547,14 @@ sr_ptr_list !rab !ptr_off !size_tag !num_elts_or_words !delta = do
          rabWriteWord32 rab  ptr_off      (a_tag + fromIntegral delta `shiftL` 2)
          rabWriteWord32 rab (ptr_off + 4) (fromIntegral size_tag + fromIntegral num_elts_or_words `shiftL` 3) -- size in bytes = # words << 3
 
-sr_ptr_struct :: ResizableArrayBuilder -> Word64 -> Word16 -> Word16 -> Word64 -> IO ()
+sr_ptr_struct :: ResizableArrayBuilder -> Offset -> Word16 -> Word16 -> Offset -> IO ()
 sr_ptr_struct !rab !ptr_off !sizedata !sizeptrs !delta = do
   rabWriteWord32 rab  ptr_off     (fromIntegral delta `shiftL` 2)
   rabWriteWord16 rab (ptr_off + 4) sizedata
   rabWriteWord16 rab (ptr_off + 6) sizeptrs
 
-sr_composite_list_helper :: ResizableArrayBuilder -> Word64 -> Word64 -> Word64 -> [s]
-                         -> (s -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ())
+sr_composite_list_helper :: ResizableArrayBuilder -> Offset -> Offset -> Offset -> [s]
+                         -> (s -> ResizableArrayBuilder -> Offset -> Offset -> IO ())
                          -> IO ()
 sr_composite_list_helper !rab !objsize_bytes !base_target_off !base_ser_off !objs !helper = do
   let ser nextoffset (n, obj) = do
@@ -569,7 +575,7 @@ sr_total_size_for sizecode _    num_elts =
                6 -> 8
                _ -> error $ "sr_total_size got wrong sizecode"
 
-serializeWith :: a -> (a -> ResizableArrayBuilder -> Word64 -> Word64 -> IO ()) -> IO ByteString
+serializeWith :: a -> (a -> ResizableArrayBuilder -> Offset -> Offset -> IO ()) -> IO ByteString
 serializeWith obj serializer = do
   rab <- newResizableArrayBuilder
   serializer obj rab 0 8 -- ptr offset, data offset

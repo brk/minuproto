@@ -14,6 +14,8 @@ import Data.Primitive.Types(Addr(Addr))
 import Data.ByteString.Internal
 import Data.ByteString.Unsafe
 
+type RABOffset = Int
+
 data ResizableArrayBuilder =
      ResizableArrayBuilder !(IORef (IOVector Word8)) -- capacity
                            !(IORef Int)              -- actual size
@@ -54,7 +56,7 @@ newResizableArrayBuilder = do
   rsiz <- newIORef 0
   return $ ResizableArrayBuilder rcap rsiz
 
-rabGrowToLimit :: ResizableArrayBuilder -> Word64 -> IO ()
+rabGrowToLimit :: ResizableArrayBuilder -> RABOffset -> IO ()
 rabGrowToLimit (ResizableArrayBuilder rcap rsiz) lim = do
   v0 <- readIORef rcap
   let !v0len = V.length v0
@@ -68,7 +70,7 @@ rabWriteBytes rab offset bs = do
   rabCheckLimit rab (offset + fromIntegral (BS.length bs))
   mapM_ (\n -> rabWriteWord8_ rab (offset + fromIntegral n) (BS.index bs n)) [0..BS.length bs - 1]
 
-rabCheckLimit :: ResizableArrayBuilder -> Word64 -> IO ()
+rabCheckLimit :: ResizableArrayBuilder -> RABOffset -> IO ()
 rabCheckLimit rab@(ResizableArrayBuilder rcap rsiz) !lim = do
   modifyIORef' rsiz (\s -> let !v = max s (fromIntegral (lim + 1)) in v)
   !v <- readIORef rcap
@@ -76,29 +78,31 @@ rabCheckLimit rab@(ResizableArrayBuilder rcap rsiz) !lim = do
     then do rabGrowToLimit rab lim
     else return ()
 
+rabWriteWord8_ :: ResizableArrayBuilder -> RABOffset -> Word8 -> IO ()
 rabWriteWord8_ !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   v <- readIORef rcap
   let !o = fromIntegral offset
   V.write v o value
 
+rabWriteBit :: ResizableArrayBuilder -> RABOffset -> Int -> Bool -> IO ()
 rabWriteBit !rab !offset !bitoff !value = do
   let !(q,r) = divMod bitoff 8
   w <- rabReadWord8 rab (offset + fromIntegral q)
   let !w' = if value then setBit w r else clearBit w r
   rabWriteWord8_ rab (offset + fromIntegral q) w'
  
-rabWriteWord8 :: ResizableArrayBuilder -> Word64 -> Word8 -> IO ()
+rabWriteWord8 :: ResizableArrayBuilder -> RABOffset -> Word8 -> IO ()
 rabWriteWord8 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabCheckLimit rab offset
   rabWriteWord8_ rab offset value
 
-rabWriteWord16 :: ResizableArrayBuilder -> Word64 -> Word16 -> IO ()
+rabWriteWord16 :: ResizableArrayBuilder -> RABOffset -> Word16 -> IO ()
 rabWriteWord16 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabCheckLimit rab (offset + 1)
   rabWriteWord8_ rab (offset + 1) (fromIntegral (value `shiftR` 8) :: Word8)
   rabWriteWord8_ rab (offset + 0) (fromIntegral (value           ) :: Word8)
 
-rabWriteWord32 :: ResizableArrayBuilder -> Word64 -> Word32 -> IO ()
+rabWriteWord32 :: ResizableArrayBuilder -> RABOffset -> Word32 -> IO ()
 rabWriteWord32 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabCheckLimit rab (offset + 3)
   rabWriteWord8_ rab (offset + 3) (fromIntegral (value `shiftR` 24) :: Word8)
@@ -106,20 +110,20 @@ rabWriteWord32 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabWriteWord8_ rab (offset + 1) (fromIntegral (value `shiftR`  8) :: Word8)
   rabWriteWord8_ rab (offset + 0) (fromIntegral (value            ) :: Word8)
 
-rabWriteWord64 :: ResizableArrayBuilder -> Word64 -> Word64 -> IO ()
+rabWriteWord64 :: ResizableArrayBuilder -> RABOffset -> Word64 -> IO ()
 rabWriteWord64 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabWriteWord32 rab (offset + 4) (fromIntegral (value `shiftR`  32) :: Word32)
   rabWriteWord32 rab (offset + 0) (fromIntegral (value             ) :: Word32)
 
 
-rabWriteInt64 :: ResizableArrayBuilder -> Word64 -> Int64 -> IO ()
+rabWriteInt64 :: ResizableArrayBuilder -> RABOffset -> Int64 -> IO ()
 rabWriteInt64 !rab !offset !value = rabWriteWord64 rab offset (fromIntegral value)
 
-rabWriteInt32 :: ResizableArrayBuilder -> Word64 -> Int32 -> IO ()
+rabWriteInt32 :: ResizableArrayBuilder -> RABOffset -> Int32 -> IO ()
 rabWriteInt32 !rab !offset !value = do rabWriteWord32 rab offset (fromIntegral value)
 
-rabWriteInt16 :: ResizableArrayBuilder -> Word64 -> Int16 -> IO ()
+rabWriteInt16 :: ResizableArrayBuilder -> RABOffset -> Int16 -> IO ()
 rabWriteInt16 !rab !offset !value = rabWriteWord16 rab offset (fromIntegral value)
 
-rabWriteInt8 :: ResizableArrayBuilder -> Word64 -> Int8 -> IO ()
+rabWriteInt8 :: ResizableArrayBuilder -> RABOffset -> Int8 -> IO ()
 rabWriteInt8 !rab !offset !value = rabWriteWord8 rab offset (fromIntegral value)
