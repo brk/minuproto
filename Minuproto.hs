@@ -448,24 +448,23 @@ sr_list_of_Type_Text texts rab ptr_off data_off = do
           go (text:rest) !poff !doff = do nwritten <- sr_Type_Text' text rab poff doff
                                           go rest (poff + 8) (doff + fromIntegral nwritten)
 
-
-byte_of_bools :: [Bool] -> Word8
-byte_of_bools first8 =
-  fromIntegral $ sum [2^k * (if d then 1 else 0)
-                     | (k,d) <- zip [0..] first8]
-
-bytes_of_bools :: [Bool] -> [Word8]
-bytes_of_bools bools = go bools [] where
-  go bools acc =
-    case splitAt 8 bools of
-      ([],      _)   -> reverse acc
-      (first8, rest) -> go rest (byte_of_bools first8:acc)
-
 sr_list_of_Type_Bool bools rab ptr_off data_off = do
   sr_ptr_list rab ptr_off 1 (fromIntegral $ length bools) (delta_in_words data_off (ptr_off + 8))
   let byts = bytes_of_bools bools
   rabWriteBytes rab data_off $ BS.pack $ byts
   rabPadToAlignment rab 8
+    where
+      bytes_of_bools :: [Bool] -> [Word8]
+      bytes_of_bools bools = go bools [] where
+        go bools acc =
+          case splitAt 8 bools of
+            ([],      _)   -> reverse acc
+            (first8, rest) -> go rest (byte_of_bools first8:acc)
+
+      byte_of_bools :: [Bool] -> Word8
+      byte_of_bools first8 =
+        fromIntegral $ sum [2^k * (if d then 1 else 0)
+                          | (k,d) <- zip [0..] first8]
 
 sr_list_of_Type_Void voids rab ptr_off data_off = do
   sr_ptr_list rab ptr_off 0 (fromIntegral $ length voids) (delta_in_words data_off (ptr_off + 8))
