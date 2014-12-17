@@ -262,9 +262,9 @@ parseStructPointerAt :: ByteString -> WordOffset -> Pointer
 parseStructPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
-  let !( b, w1) = splitS 30 w0 in
-  let !( c, w2) = splitU 16 w1 in
-  let !( d, w3) = splitU 16 w2 in
+  let !(!b, w1) = splitS 30 w0 in
+  let !(!c, w2) = splitU 16 w1 in
+  let !(!d, w3) = splitU 16 w2 in
   StructPtr bs (show o) (WordOffset b + o + 1) c d
 
 w2i :: Word64 -> Int64
@@ -284,9 +284,9 @@ parseListTagPointerAt :: ByteString -> WordOffset -> (Word64, Word64, Word64)
 parseListTagPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
-  let !( b, w1) = splitU 30 w0 in -- number of elements in the list
-  let !( c, w2) = splitU 16 w1 in -- # data words, per elt.
-  let !( d, w3) = splitU 16 w2 in -- # ptr  words, per elt.
+  let !(!b, w1) = splitU 30 w0 in -- number of elements in the list
+  let !(!c, w2) = splitU 16 w1 in -- # data words, per elt.
+  let !(!d, w3) = splitU 16 w2 in -- # ptr  words, per elt.
   (b, c, d)
 
 data ListEltSize = LES_Phantom
@@ -313,9 +313,9 @@ parseListPointerAt :: ByteString -> WordOffset -> Pointer
 parseListPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
-  let !( b, w1) = splitS 30 w0 in
-  let !( c, w2) = splitU 3  w1 in
-  let !( d, w3) = splitU 29 w2 in
+  let !(!b, w1) = splitS 30 w0 in
+  let !(!c, w2) = splitU 3  w1 in
+  let !(!d, w3) = splitU 29 w2 in
   let !list_target_offset = WordOffset b + o + 1 in
   let !tagptr = parseListTagPointerAt bs list_target_offset in
   let !numelts = if c == 7 then let (ne, _, _) = tagptr in ne else d in
@@ -373,9 +373,9 @@ parseInterSegmentPointerAt :: ByteString -> [ByteString] -> WordOffset -> Pointe
 parseInterSegmentPointerAt bs segs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
-  let !( b, w1) = splitU 1 w0 in
-  let !( c, w2) = splitU 29 w1 in
-  let !( d, w3) = splitU 32 w2 in
+  let !(!b, w1) = splitU 1 w0 in
+  let !(!c, w2) = splitU 29 w1 in
+  let !(!d, w3) = splitU 32 w2 in
   if b == 0
     then let bs' = lookupSegment segs (fromIntegral d) in
          let pp = parseUnknownPointerAt "<<parseInterSegmentPointerAt>>" bs' segs (WordOffset (fromIntegral c)) in
