@@ -11,7 +11,7 @@ import Data.Bits
 import Data.Word
 import qualified Data.ByteString as BS
 import Data.ByteString(ByteString)
-import Data.Char(toUpper)
+import Data.Char(toUpper, isDigit)
 import Data.List((!!), foldl')
 import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
@@ -110,6 +110,8 @@ emitIO          :: (?tgt::TargetLanguage) => String -> Doc
 emitIO          = _targetEmitIO ?tgt
 emitBinder      :: (?tgt::TargetLanguage) => String -> Doc
 emitBinder      = _targetEmitBinder ?tgt
+emitRebind      :: (?tgt::TargetLanguage) => Doc -> Doc -> Doc
+emitRebind      = _targetEmitRebind ?tgt
 cgSequenceType  :: (?tgt::TargetLanguage) => Doc -> Doc
 cgSequenceType  = _targetCgSequenceType ?tgt
 cgFieldSlotType :: (?tgt::TargetLanguage) => Type_ -> CG Doc
@@ -138,6 +140,7 @@ data TargetLanguage = TargetLanguage {
   , _targetEmitReturn       :: Doc    -> Doc
   , _targetEmitIO           :: String -> Doc
   , _targetEmitBinder       :: String -> Doc
+  , _targetEmitRebind       :: Doc -> Doc -> Doc
   , _targetCgSequenceType   :: Doc    -> Doc
   , _targetCgFieldSlotType  :: Type_  -> CG Doc
   , _targetCgDataType       :: String -> Word64 -> [DataCtor] -> Doc
@@ -151,7 +154,7 @@ targetHaskell = TargetLanguage
                   hsIfthen hsOffsetType hsMultiLineComment
                   hsLetbinds hsFnDefinition hsEmitAdd
                   hsEmitMul hsEmitListLength hsEmitReturn hsEmitIO
-                  hsEmitBinder hsCgSequenceType
+                  hsEmitBinder hsEmitRebind hsCgSequenceType
                   hscgFieldSlotType hsCgDataType
   where
     hsTargetFilename protoname = moduleNameOf protoname ++ ".hs"
@@ -190,6 +193,7 @@ targetHaskell = TargetLanguage
     hsEmitReturn v = text "return" <+> v
     hsEmitIO str = text $ "IO " ++ str
     hsEmitBinder str = text $ "!" ++ str -- Make all binders strict in generated code!
+    hsEmitRebind v e = v <+> text "<-" <+> e
 
     hsFnDefinition name args argtypes retty body =
       let defn = name <+> hsep args <+> text "=" <$> indent 2 body <$> text "" in
@@ -246,6 +250,7 @@ targetHaskell = TargetLanguage
 
 --- }}}
 
+matchOrDie str alts = match str (alts ++ [(text "_", doerror $ "unable to match " ++ str)])
 
 -- {{{ Encapsulation of Foster syntax
 targetFoster = TargetLanguage
@@ -254,7 +259,7 @@ targetFoster = TargetLanguage
                   fosIfthen fosOffsetType fosMultiLineComment
                   fosLetbinds fosFnDefinition fosEmitAdd
                   fosEmitMul fosEmitListLength fosEmitReturn fosEmitIO
-                  fosEmitBinder fosCgSequenceType
+                  fosEmitBinder fosEmitRebind fosCgSequenceType
                   fosCgFieldSlotType fosCgDataType
   where
     fosTargetFilename protoname = moduleNameOf protoname ++ ".foster"
@@ -273,8 +278,12 @@ targetFoster = TargetLanguage
     fosDoerror str   = text "prim kill-entire-process " <+> text (show str)
     fosMatch var arms =
          align $  text "case" <+> text var
-              <$> indent 2 (vcat [text "of $" <> pat <+> text "->" <+> body | (pat, body) <- arms])
+              <$> indent 2 (vcat [text "of" <+> ctor pat <+> text "->" <+> body | (pat, body) <- arms])
               <$> text "end"
+      where ctor pat = case show pat of
+                         "_"  -> pat
+                         (d:_) | isDigit d -> pat
+                         _    -> text "$" <> pat
     fosIfthen cnd bdy elz = parens (text "if" <+> cnd
                               <$> align (vsep [text "then" <+> bdy
                                               ,text "else" <+> elz]) <$> text "end")
@@ -288,10 +297,11 @@ targetFoster = TargetLanguage
 
     fosEmitAdd s1 s2 = fosTargetCall [text s1, text "+Word", text s2]
     fosEmitMul s1 s2 = fosTargetCall [text s1, text "*Word", text s2]
-    fosEmitListLength obj = fosTargetCall [text "arrayLengthWord", obj]
+    fosEmitListLength obj = fosTargetCall [text "listLengthWord", obj]
     fosEmitReturn v = v
     fosEmitIO str = text str
     fosEmitBinder str = text str
+    fosEmitRebind v e = v <+> text "=" <+> e
 
     fosFnDefinition name args argtypes retty body =
       let decl = name <+> text "::" <+> encloseSep (text "{ ") (text " }") (text " => ") (argtypes ++ [retty]) <> text ";" in
@@ -322,23 +332,23 @@ targetFoster = TargetLanguage
               where arg n = text "v" <> text (show n)
                     args  = hsep $ map arg [0 .. fieldCount - 1]
 
-    fosCgSequenceType doc = parens (text "Array" <+> doc)
+    fosCgSequenceType doc = parens (text "List" <+> doc)
     fosCgFieldSlotType type_ =
         case type_ of
           Type_Void        -> return $ text "()"
           Type_Bool        -> return $ text "Bool"
           Type_Int8        -> return $ text "Int8"
-          Type_Int16       -> return $ text "Int16"
+          Type_Int16       -> return $ text "Int32" -- !!!
           Type_Int32       -> return $ text "Int32"
           Type_Int64       -> return $ text "Int64"
-          Type_UInt8       -> return $ text "Word8"
-          Type_UInt16      -> return $ text "Word16"
-          Type_UInt32      -> return $ text "Word32"
-          Type_UInt64      -> return $ text "Word64"
+          Type_UInt8       -> return $ text "Int8"
+          Type_UInt16      -> return $ text "Int32" -- !!!
+          Type_UInt32      -> return $ text "Int32"
+          Type_UInt64      -> return $ text "Int64"
           Type_Float32     -> return $ text "Float"
           Type_Float64     -> return $ text "Double"
-          Type_Text        -> return $ text "(Array Int8)"
-          Type_Data        -> return $ text "(Array Int8)"
+          Type_Text        -> return $ text "Bytes"
+          Type_Data        -> return $ text "Bytes"
           Type_List      t -> liftM fosCgSequenceType (fosCgFieldSlotType t)
           Type_Enum      w -> liftM text (lookupId w)
           Type_Struct    w -> liftM text (lookupId w)
@@ -468,9 +478,10 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let sizedata = nodeStruct_dataWordCount node
   let size     = nodeStruct_pointerCount node + sizedata
   let fnname   = serializerForType (Type_Struct nodeid)
+  dataTy <- cgFieldSlotType Type_Data
   -- data fields first, then pointer fields
   return $
-        fnDefinition (text $ "sr" ++ dname) (splitArgs "obj") [text dname] (retTy (emitIO "ByteString"))
+        fnDefinition (text $ "sr" ++ dname) (splitArgs "obj") [text dname] (retTy (emitIO (show dataTy)))
                      (txCall [text "serializeWith", text "obj", fnname])
     <$> fnDefinition fnname (splitArgs "obj rab ptr_off data_off")
                      [text dname, text "ResizableArrayBuilder", cgOffsetType, cgOffsetType] (retTy (emitIO "()"))
@@ -485,7 +496,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                      (doblock [
                           letbinds [("ptrs_off", emitAdd "data_off" (show (8 * sizedata)))]
                          ,if nodeStruct_discriminantCount node == 0
-                            then doblock $ (map (emitFieldSerializer dname) (nodeStruct_fields node))
+                            then doblock $ (concatMap (emitFieldSerializer dname) (nodeStruct_fields node))
                                         ++ [emitReturn (text "()")]
                             else
                                 let indiscriminantFields = [f | f <- nodeStruct_fields node, fieldDiscriminant f == 0xffff] in
@@ -493,10 +504,10 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                                 doblock $ [
                                   letbinds [("absDiscrimOff", emitAdd "data_off"
                                                                 (show $ 2 * nodeStruct_discriminantOffset node))]
-                                  , match "obj" [(fieldCtorName dname f <+> text "{}"
-                                             ,doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                                        ,emitFieldSerializer dname f] ++
-                                                        (map (emitFieldSerializer dname) indiscriminantFields))
+                                  , matchOrDie "obj" [(fieldCtorName dname f <+> text "{}"
+                                             ,doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]]
+                                                        ++ emitFieldSerializer dname f ++
+                                                        (concatMap (emitFieldSerializer dname) indiscriminantFields))
                                                   | f <- discriminatedFields]] ++ [emitReturn (text "()")]
                        ])
     <$> fnDefinition (serializerForType (Type_List $ Type_Struct nodeid))
@@ -511,7 +522,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                             ,("target_off", emitAdd "data_off" "8" <+> comment (text "accounting for tag word"))
                             ]
                    , srCall ["sr_composite_list_helper", "rab", "objsize", "target_off",
-                                 "(target_off + totalsize)", "objs", helperForStructSerializer nodeid]
+                                 show (emitAdd "target_off" "totalsize"), "objs", helperForStructSerializer nodeid]
                    , srCall ["sr_ptr_struct", "rab", "data_off", show sizedata, show (size - sizedata), "num_elts"]
                    , txCall [text "sr_ptr_list", text "rab", text "ptr_off", text "7", text "num_words",
                                   txCall [text "delta_in_words", text "data_off",
@@ -537,7 +548,7 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
     fnDefinition (serializerForGroup nodeid)
                  (splitArgs "rab obj nextoffset data_off ptrs_off") noArgTys noRetTy
               (doblock $ (letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))])
-                         :map (emitFieldSerializer dname) (nodeStruct_fields node))
+                         :concatMap (emitFieldSerializer dname) (nodeStruct_fields node))
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
   return $
@@ -547,8 +558,8 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                  (doblock [letbinds [("absDiscrimOff", emitAdd "data_off" (show (2 * (nodeStruct_discriminantOffset node))))]
                           ,match "obj" [
                              (fieldCtorName dname f <+> text "{}",
-                              doblock [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]
-                                      ,emitFieldSerializer dname f])
+                              doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]]
+                                        ++ emitFieldSerializer dname f)
                              | f <- nodeStruct_fields node]])
 
 emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
@@ -570,29 +581,29 @@ emitNodeUnionSerializer node dname nodeid = do
 -- Individual bits must be specially serialized, because their offsets
 -- are measured in bits, not bytes.
 emitFieldSerializer typename f | (FieldSlot offsetInBits Type_Bool _) <- fieldUnion f =
-  (txCall [serializerForFieldType f Type_Bool,
+  [(txCall [serializerForFieldType f Type_Bool,
               text "rab", callFieldAccessor typename f "obj",
               text "data_off", pretty offsetInBits])
-     <+> comment (text "serialize bool field" <+> quotedStr (fieldName_ f))
+     <+> comment (text "serialize bool field" <+> quotedStr (fieldName_ f))]
 
 emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
   let offsetInBytes = fromIntegral w * byteSizeOfType t in
   (case kindOfType t of
     KindPtr ->
-      txCall [serializerForFieldType f t,
+      [txCall [serializerForFieldType f t,
                      callFieldAccessor typename f "obj",
                      text "rab",  (emitAdd "ptrs_off" (show offsetInBytes)), text "nextoffset"]
-      <$> text "nextoffset <- updateNextOffset rab nextoffset"
+      ,emitRebind (text "nextoffset") (srCall ["updateNextOffset", "rab", "nextoffset"])]
     KindData ->
-      txCall [serializerForFieldType f t, text "rab", callFieldAccessor typename f "obj",
-              (emitAdd "data_off" (show offsetInBytes))]
+      [txCall [serializerForFieldType f t, text "rab", callFieldAccessor typename f "obj",
+              (emitAdd "data_off" (show offsetInBytes))]]
     )
 
 emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
-  txCall [serializerForGroup w,
-          text "rab", callFieldAccessor typename f "obj",
-          text "nextoffset", text "data_off", text "ptrs_off"]
-    <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")
+  [txCall [serializerForGroup w,
+           text "rab", callFieldAccessor typename f "obj",
+           text "nextoffset", text "data_off", text "ptrs_off"]
+     <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")]
 
 getFieldAccessor typename f =
   if fieldDiscriminant f /= 0xffff
@@ -601,7 +612,7 @@ getFieldAccessor typename f =
 
 serializerForFieldType f t =
   if isFieldOptional f
-    then txCall [text "sr_Maybe", serializerForType t]
+    then text "sr_Maybe" <+> serializerForType t -- Note: assuming justaposition for application...
     else serializerForType t
 -- }}}
 
@@ -617,7 +628,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
         <$> fnDefinition fnname [text "obj"] [text "Object"] (retTy $ text dname)
                       (ifthen (srCall ["isDefaultObj", "obj"])
                          (doerror $ "Unset value in non-optional field of type " ++ show dname)
-                         (match "obj"
+                         (matchOrDie "obj"
                             [(text "StructObj bs ptrs"
                              ,(match (show (extractData Type_UInt16 discoffb))
                                 [(pretty d, fieldAccessor)
@@ -629,17 +640,18 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
   return $  fnDefinition (text $ "mk" ++ dname) [text "obj"] [text "Object"] (retTy $ text dname)
                          (txCall [fnname, text "obj"])
-        <$> fnDefinition fnname [text "obj@(StructObj bs ptrs)"] [text "Object"] (retTy $ text dname)
+        <$> fnDefinition fnname [text "obj"] [text "Object"] (retTy $ text dname)
                          (ifthen (srCall ["isDefaultObj", "obj"])
                            (doerror $ "Unset value in non-optional field of type " ++ show dname)
-                           (match "obj"
+                           (matchOrDie "obj"
                               [(text "StructObj bs ptrs",
                                (doblock [txCall (text dname:fieldAccessors)]))]))
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
-  return $  fnDefinition (text fnname) [emitBinder "wx"] [text "Word16"] (retTy $ text dname)
-                         (match "wx"
+  w16 <- cgFieldSlotType Type_UInt16
+  return $  fnDefinition (text fnname) [emitBinder "wx"] [w16] (retTy $ text dname)
+                         (matchOrDie "wx"
                             [(text (show (enumerantOrder en))
                              ,text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en))
                            | en <- nodeEnum_enumerants node])
@@ -670,7 +682,7 @@ emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
 
 extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
-  let accessor = srCall ["at", accessorNameForType t, show offset, "bs"] in
+  let accessor = srCall ["at_", accessorNameForType t, show offset, "bs"] in
   case t of
     Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
@@ -682,15 +694,15 @@ extractPtr f msg t offset =
     case t of
      Type_Text        -> txCall [extractPtrFunc t, ptr]
      Type_Data        -> txCall [extractPtrFunc t, ptr]
-     Type_List      x -> txCall [text "mapL",  text ("\"" ++ show x ++ "\""), extractPtrFunc x, ptr]
+     Type_List      x -> txCall [text "mapL", extractPtrFunc x, ptr]
      Type_Struct    _ -> txCall [extractPtrFunc t, ptr]
      Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
  where
-   ptr = srCall ["lookupPointer", show msg, "ptrs", show offset]
-   wrapper d = if isFieldOptional f then txCall [text "_mkMaybe", d]
-                                    else                          d
+   ptr = srCall ["lookupPointer", "ptrs", show offset] <+> comment (string msg)
+   wrapper d = if isFieldOptional f then text "_mkMaybe" <+> d -- Hardcoded juxtaposition syntax...
+                                    else                     d
    extractPtrFunc t =
      wrapper $ case t of
         Type_Text        -> text "unText"
@@ -758,12 +770,16 @@ split delim str =
             else ([],list)
           where (ys,zs) = spanList func xs
 
-legalizeTypeName fs = case split ":" fs of
-                        [_, s] -> replace "." "_" s
-                        [s]    -> replace "." "_" s
+legalizeTypeName fs =
+    let post = case split ":" fs of
+                        [_, s] -> s
+                        [s]    -> s in
+    replace "." "_" (munge post)
   where
     sjoin delim s = concat (intersperse delim s)
     replace old new s = sjoin new . split old $ s
+    munge "Type" = "Type_"
+    munge other  = other
 
 capitalizeFirstLetter [] = []
 capitalizeFirstLetter (h:t) = toUpper h : t

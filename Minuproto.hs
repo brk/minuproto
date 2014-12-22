@@ -74,20 +74,20 @@ bs8 :: ByteString -> Word8
 bs8 !bs = let !v = BS.index bs 0 in v
 
 bs16 :: ByteString -> Word16
-bs16 !bs = let !w0 = at bs8 0 bs in
-           let !w1 = at bs8 1 bs in
+bs16 !bs = let !w0 = at_ bs8 0 bs in
+           let !w1 = at_ bs8 1 bs in
            let !v = _w16 w1 w0 in
            v
 
 bs32 :: ByteString -> Word32
-bs32 !bs = let !w0 = at bs16 0 bs in
-           let !w1 = at bs16 2 bs in
+bs32 !bs = let !w0 = at_ bs16 0 bs in
+           let !w1 = at_ bs16 2 bs in
            let !v = _w32 w1 w0 in
            v
 
 bs64 :: ByteString -> Word64
-bs64 !bs = let !w0 = at bs32 0 bs in
-           let !w1 = at bs32 4 bs in
+bs64 !bs = let !w0 = at_ bs32 0 bs in
+           let !w1 = at_ bs32 4 bs in
            let !v = _w64 w1 w0 in
            v
 
@@ -105,9 +105,9 @@ bs64i bs = let !v = fromIntegral (bs64 bs) in v
 
 bsvoid _bs = ()
 
-at :: (ByteString -> word) -> Int64 -> ByteString -> word
-at _  !n !bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
-at !f !n !bs = let !v = f (BS.drop (fromIntegral n) bs) in v
+at_ :: (ByteString -> word) -> Int64 -> ByteString -> word
+at_ _  !n !bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
+at_ !f !n !bs = let !v = f (BS.drop (fromIntegral n) bs) in v
 
 bs1b :: Int64 -> ByteString -> Bool
 bs1b !offset !bs =
@@ -141,9 +141,9 @@ instance Num WordOffset where
   fromInteger i = WordOffset $ fromInteger i
 
 word :: ByteString -> WordOffset -> Word64
-word !bs !(WordOffset nw) =                at bs64 (8 * nw) bs
+word !bs !(WordOffset nw) =                at_ bs64 (8 * nw) bs
 
-byte !bs !(ByteOffset nb) = fromIntegral $ at bs8  nb bs
+byte !bs !(ByteOffset nb) = fromIntegral $ at_ bs8  nb bs
 
 slice !off !len !bs = BS.take (fromIntegral len) (BS.drop (fromIntegral off) bs)
 sliceWords !off !len !bs = slice (8 * off) (8 * len) bs
@@ -160,8 +160,8 @@ splitS n w = let (u, r) = splitU n w in
                else (   fromIntegral   u, r)
 
 splitSegments rawbytes =
-  let numsegs = (at bs32 0 rawbytes) + 1 in
-  let segsizes = [at bs32 (4 * (fromIntegral n)) rawbytes | n <- [1..numsegs]] in
+  let numsegs = (at_ bs32 0 rawbytes) + 1 in
+  let segsizes = [at_ bs32 (4 * (fromIntegral n)) rawbytes | n <- [1..numsegs]] in
   -- If we have an odd number of segments, the the segment lengths plus the #segs word
   -- will end word-aligned; otherwise, we need an extra padding word.
   let startsegpos = 4 * (1 + fromIntegral numsegs + (if isEven numsegs then 1 else 0)) in
@@ -276,8 +276,6 @@ derefStructPointer (StructPtr bs origin off numdata numptrs) segs =
              [parseUnknownPointerAt ("fromstruct@" ++ origin) bs segs (off + WordOffset (w2i n))
                | n <- numdata `upby` numptrs]
 
-readStructPointerAt o bs segs = derefStructPointer (parseStructPointerAt bs o) segs
-
 readUnknownPointerAt o bs segs = derefUnknownPointer segs (parseUnknownPointerAt "readUnknownPointerAt" bs segs o)
 
 parseListTagPointerAt :: ByteString -> WordOffset -> (Word64, Word64, Word64)
@@ -364,10 +362,10 @@ lookupSegment segs idx =
     then segs !! idx
     else error $ "Minuproto.hs: lookupSegment cannot get " ++ show idx ++ "'th out of " ++ show (length segs) ++ " segments."
 
-lookupPointer msg ptrs idx =
+lookupPointer ptrs idx =
   if idx < length ptrs
     then ptrs !! idx
-    else error $ "Minuproto.hs: lookupPointer(" ++ msg ++ ") cannot get " ++ show idx ++ "'th out of " ++ show (length ptrs) ++ " pointers."
+    else error $ "Minuproto.hs: lookupPointer cannot get " ++ show idx ++ "'th out of " ++ show (length ptrs) ++ " pointers."
 
 parseInterSegmentPointerAt :: ByteString -> [ByteString] -> WordOffset -> Pointer
 parseInterSegmentPointerAt bs segs o =
@@ -416,11 +414,11 @@ updateNextOffset rab prevoffset = do
   nextoffset <- rabSize rab
   return $ max prevoffset (fromIntegral nextoffset)
 
-mapL :: String -> (Object -> t) -> Object -> [t]
-mapL _ f (ListObj vals) = map f vals
-mapL _ _ (StructObj bs []) | BS.null bs = []
-mapL _ _ (StrObj "") = []
-mapL msg f other = error $ "mapL("++msg++") can't map over " ++ show (pretty other) ++ " which is " ++ show other
+mapL :: (Object -> t) -> Object -> [t]
+mapL f (ListObj vals) = map f vals
+mapL _ (StructObj bs []) | BS.null bs = []
+mapL _ (StrObj "") = []
+mapL f other = error $ "mapL can't map over " ++ show (pretty other) ++ " which is " ++ show other
 
 delta_in_words bo1 bo2 = (bo1 - bo2) `div` 8
 
