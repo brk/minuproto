@@ -682,7 +682,7 @@ emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
 
 extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
-  let accessor = srCall ["at_", accessorNameForType t, show offset, "bs"] in
+  let accessor = srCall [accessorNameForType t, show offset, "bs"] in
   case t of
     Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor

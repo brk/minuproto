@@ -70,49 +70,45 @@ _w32 !a !b = wordLE 16 a b
 _w64 :: Word32 -> Word32 -> Word64
 _w64 !a !b = wordLE 32 a b
 
-bs8 :: ByteString -> Word8
-bs8 !bs = let !v = BS.index bs 0 in v
+bs8 :: Int64 -> ByteString -> Word8
+bs8 !idx !bs = let !v = BS.index bs (fromIntegral idx) in v
 
-bs16 :: ByteString -> Word16
-bs16 !bs = let !w0 = at_ bs8 0 bs in
-           let !w1 = at_ bs8 1 bs in
-           let !v = _w16 w1 w0 in
-           v
+bs16 :: Int64 -> ByteString -> Word16
+bs16 !idx !bs = let !w0 = bs8 idx       bs in
+                let !w1 = bs8 (idx + 1) bs in
+                let !v = _w16 w1 w0 in
+                v
 
-bs32 :: ByteString -> Word32
-bs32 !bs = let !w0 = at_ bs16 0 bs in
-           let !w1 = at_ bs16 2 bs in
-           let !v = _w32 w1 w0 in
-           v
+bs32 :: Int64 -> ByteString -> Word32
+bs32 !idx !bs = let !w0 = bs16 idx       bs in
+                let !w1 = bs16 (idx + 2) bs in
+                let !v = _w32 w1 w0 in
+                v
 
-bs64 :: ByteString -> Word64
-bs64 !bs = let !w0 = at_ bs32 0 bs in
-           let !w1 = at_ bs32 4 bs in
-           let !v = _w64 w1 w0 in
-           v
+bs64 :: Int64 -> ByteString -> Word64
+bs64 !idx !bs = let !w0 = bs32 idx       bs in
+                let !w1 = bs32 (idx + 4) bs in
+                let !v = _w64 w1 w0 in
+                v
 
-bs8i :: ByteString -> Int8
-bs8i bs = let !v = fromIntegral (bs8 bs) in v
+bs8i :: Int64 -> ByteString -> Int8
+bs8i idx bs = let !v = fromIntegral (bs8 idx bs) in v
 
-bs16i :: ByteString -> Int16
-bs16i bs = let !v = fromIntegral (bs16 bs) in v
+bs16i :: Int64 -> ByteString -> Int16
+bs16i idx bs = let !v = fromIntegral (bs16 idx bs) in v
 
-bs32i :: ByteString -> Int32
-bs32i bs = let !v = fromIntegral (bs32 bs) in v
+bs32i :: Int64 -> ByteString -> Int32
+bs32i idx bs = let !v = fromIntegral (bs32 idx bs) in v
 
-bs64i :: ByteString -> Int64
-bs64i bs = let !v = fromIntegral (bs64 bs) in v
+bs64i :: Int64 -> ByteString -> Int64
+bs64i idx bs = let !v = fromIntegral (bs64 idx bs) in v
 
 bsvoid _bs = ()
-
-at_ :: (ByteString -> word) -> Int64 -> ByteString -> word
-at_ _  !n !bs | BS.length bs <= fromIntegral n = error $ "ByteString too small for read at " ++ show n
-at_ !f !n !bs = let !v = f (BS.drop (fromIntegral n) bs) in v
 
 bs1b :: Int64 -> ByteString -> Bool
 bs1b !offset !bs =
   let !(byteoffset, bitoffset) = offset `divMod` 8 in
-  let !v = bs8 (BS.drop (fromIntegral byteoffset) bs) in
+  let !v = bs8 byteoffset bs in
   testBit v (fromIntegral bitoffset)
 
 isEven n = (n `mod` 2) == 0
@@ -141,9 +137,9 @@ instance Num WordOffset where
   fromInteger i = WordOffset $ fromInteger i
 
 word :: ByteString -> WordOffset -> Word64
-word !bs !(WordOffset nw) =                at_ bs64 (8 * nw) bs
+word !bs !(WordOffset nw) =                bs64 (8 * nw) bs
 
-byte !bs !(ByteOffset nb) = fromIntegral $ at_ bs8  nb bs
+byte !bs !(ByteOffset nb) = fromIntegral $ bs8  nb bs
 
 slice !off !len !bs = BS.take (fromIntegral len) (BS.drop (fromIntegral off) bs)
 sliceWords !off !len !bs = slice (8 * off) (8 * len) bs
@@ -160,8 +156,8 @@ splitS n w = let (u, r) = splitU n w in
                else (   fromIntegral   u, r)
 
 splitSegments rawbytes =
-  let numsegs = (at_ bs32 0 rawbytes) + 1 in
-  let segsizes = [at_ bs32 (4 * (fromIntegral n)) rawbytes | n <- [1..numsegs]] in
+  let numsegs = (bs32 0 rawbytes) + 1 in
+  let segsizes = [bs32 (4 * (fromIntegral n)) rawbytes | n <- [1..numsegs]] in
   -- If we have an odd number of segments, the the segment lengths plus the #segs word
   -- will end word-aligned; otherwise, we need an extra padding word.
   let startsegpos = 4 * (1 + fromIntegral numsegs + (if isEven numsegs then 1 else 0)) in
@@ -221,22 +217,22 @@ mk_Bool (StrObj "1") = True
 mk_Bool o = error $ "mk_bool: " ++ show o
 
 mk_Word64 :: Object -> Word64
-mk_Word64 (BytesObj bs) = bs64 bs
+mk_Word64 (BytesObj bs) = bs64 0 bs
 mk_Word32 :: Object -> Word32
-mk_Word32 (BytesObj bs) = bs32 bs
+mk_Word32 (BytesObj bs) = bs32 0 bs
 mk_Word16 :: Object -> Word16
-mk_Word16 (BytesObj bs) = bs16 bs
+mk_Word16 (BytesObj bs) = bs16 0 bs
 mk_Word8 :: Object -> Word8
-mk_Word8 (BytesObj bs) = bs8 bs
+mk_Word8 (BytesObj bs) = bs8 0 bs
 
 mk_Int64 :: Object -> Int64
-mk_Int64 (BytesObj bs) = bs64i bs
+mk_Int64 (BytesObj bs) = bs64i 0 bs
 mk_Int32 :: Object -> Int32
-mk_Int32 (BytesObj bs) = bs32i bs
+mk_Int32 (BytesObj bs) = bs32i 0 bs
 mk_Int16 :: Object -> Int16
-mk_Int16 (BytesObj bs) = bs16i bs
+mk_Int16 (BytesObj bs) = bs16i 0 bs
 mk_Int8 :: Object -> Int8
-mk_Int8 (BytesObj bs) = bs8i bs
+mk_Int8 (BytesObj bs) = bs8i 0 bs
 
 instance Pretty Object where
   pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"

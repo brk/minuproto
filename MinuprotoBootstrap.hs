@@ -219,7 +219,7 @@ mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles]) =
 mkCodeGeneratorRequest other = error $ "mkCodeGeneratorRequest $ " ++ show other
 
 mkRequestedFile (StructObj bs [name, _imports]) = RequestedFile id (unStrObj name)
-  where id = at_ bs64 0 bs
+  where id = bs64 0 bs
 mkRequestedFile other = error $ "mkRequestedFile " ++ show (pretty other)
 
 mkNode          (StructObj bs
@@ -228,18 +228,18 @@ mkNode          (StructObj bs
                             annotations:rest)) =
     Node id scopeId prefixLen (unStrObj displayNameStrObj) union (mapL mkNestedNode nestedNodes)
       where
-          id        = at_ bs64  0 bs
-          prefixLen = at_ bs32  8 bs
-          which     = at_ bs16 12 bs
-          scopeId   = at_ bs64 16 bs
+          id        = bs64  0 bs
+          prefixLen = bs32  8 bs
+          which     = bs16 12 bs
+          scopeId   = bs64 16 bs
           union     = case which of
                         0 -> NodeFile
-                        1 -> NodeStruct (at_ bs16 14 bs)
-                                        (at_ bs16 24 bs)
-                                        (at_ bs16 26 bs)
-                                        (at_ bs8  28 bs)
-                                        (at_ bs16 30 bs)
-                                        (at_ bs16 32 bs)
+                        1 -> NodeStruct (bs16 14 bs)
+                                        (bs16 24 bs)
+                                        (bs16 26 bs)
+                                        (bs8  28 bs)
+                                        (bs16 30 bs)
+                                        (bs16 32 bs)
                                         (mapL mkField (rest !! 0))
                         2 -> NodeEnum (mapL mkEnumerant (rest !! 0))
                         3 -> NodeInterface (mapL mkMethod (rest !! 0))
@@ -261,24 +261,24 @@ mkNode          (StructObj bs
 
 mkField  (StructObj bs (name:annotations:rest)) =
   Field (unStrObj name) codeOrder discriminantValue t1 explicit (mapL mkAnnotation annotations)
-    where codeOrder = at_ bs16 0 bs
-          discriminantValue = (at_ bs16 2 bs) `xor` (65535 :: Word16)
-          which = at_ bs16 8 bs
+    where codeOrder = bs16 0 bs
+          discriminantValue = (bs16 2 bs) `xor` (65535 :: Word16)
+          which = bs16 8 bs
           t1 = case which of
-                0 -> FieldSlot (at_ bs32 4 bs)
+                0 -> FieldSlot (bs32 4 bs)
                                (mkType  $ rest !! 0)
                                (mkValue $ rest !! 1)
-                1 -> FieldGroup (at_ bs64 16 bs)
+                1 -> FieldGroup (bs64 16 bs)
                 _ -> error "Field which1"
-          explicit = case at_ bs16 10 bs of
+          explicit = case bs16 10 bs of
                        0 -> FieldOrdinalImplicit
-                       1 -> FieldOrdinalExplicit (at_ bs16 12 bs)
+                       1 -> FieldOrdinalExplicit (bs16 12 bs)
 
 mkField other = error $ "mkField couldn't handle\n" ++ show (pretty other)
 
 mkType :: Object -> Type_
 mkType (StructObj bs objs) =
-  let which = at_ bs16 0 bs in
+  let which = bs16 0 bs in
   case which of
     0  -> Type_Void
     1  -> Type_Bool
@@ -295,45 +295,45 @@ mkType (StructObj bs objs) =
     12 -> Type_Text
     13 -> Type_Data
     14 -> Type_List       (mkType $ objs !! 0)
-    15 -> Type_Enum       (at_ bs64 8 bs)
-    16 -> Type_Struct     (at_ bs64 8 bs)
-    17 -> Type_Interface  (at_ bs64 8 bs)
+    15 -> Type_Enum       (bs64 8 bs)
+    16 -> Type_Struct     (bs64 8 bs)
+    17 -> Type_Interface  (bs64 8 bs)
     18 -> Type_Object
 
 mkValue :: Object -> Value
 mkValue (StructObj bs objs) =
-  let which = at_ bs16 0 bs in
+  let which = bs16 0 bs in
   case which of
     0  -> Value_Void
-    1  -> Value_Bool     (at_ bs8  2 bs `mod` 2 == 1)
-    2  -> Value_Int8     (at_ bs8  2 bs)
-    3  -> Value_Int16    (at_ bs16 2 bs)
-    4  -> Value_Int32    (at_ bs32 2 bs)
-    5  -> Value_Int64    (at_ bs64 2 bs)
-    6  -> Value_UInt8    (at_ bs8  2 bs)
-    7  -> Value_UInt16   (at_ bs16 2 bs)
-    8  -> Value_UInt32   (at_ bs32 2 bs)
-    9  -> Value_UInt64   (at_ bs64 2 bs)
-    10 -> Value_Float32  (wordToFloat  $ at_ bs32 2 bs)
-    11 -> Value_Float64  (wordToDouble $ at_ bs64 2 bs)
+    1  -> Value_Bool     (bs8  2 bs `mod` 2 == 1)
+    2  -> Value_Int8     (bs8  2 bs)
+    3  -> Value_Int16    (bs16 2 bs)
+    4  -> Value_Int32    (bs32 2 bs)
+    5  -> Value_Int64    (bs64 2 bs)
+    6  -> Value_UInt8    (bs8  2 bs)
+    7  -> Value_UInt16   (bs16 2 bs)
+    8  -> Value_UInt32   (bs32 2 bs)
+    9  -> Value_UInt64   (bs64 2 bs)
+    10 -> Value_Float32  (wordToFloat  $ bs32 2 bs)
+    11 -> Value_Float64  (wordToDouble $ bs64 2 bs)
     12 -> Value_Text     (unStrObj $ objs !! 0)
     13 -> Value_Data     (unStrObj $ objs !! 0)
     14 -> Value_List       
-    15 -> Value_Enum     (at_ bs16 2 bs)
+    15 -> Value_Enum     (bs16 2 bs)
     16 -> Value_Struct     
     17 -> Value_Interface  
     18 -> Value_Object   (objs !! 0)
     _  -> Value_ERROR
 
 mkMethod (StructObj bs (name:rest)) =
-  Method (unStrObj name) (at_ bs16 0 bs)
+  Method (unStrObj name) (bs16 0 bs)
 
-mkNestedNode (StructObj bs [name]) = NestedNode (unStrObj name) (at_ bs64 0 bs)
+mkNestedNode (StructObj bs [name]) = NestedNode (unStrObj name) (bs64 0 bs)
 
 mkEnumerant (StructObj bs (name:rest)) =
-  Enumerant (unStrObj name) (at_ bs16 0 bs)
+  Enumerant (unStrObj name) (bs16 0 bs)
 
 mkAnnotation (StructObj bs (value:rest)) =
-  Annotation (at_ bs64 0 bs)
+  Annotation (bs64 0 bs)
              (mkValue value)
 
