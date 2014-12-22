@@ -297,7 +297,7 @@ targetFoster = TargetLanguage
 
     fosEmitAdd s1 s2 = fosTargetCall [text s1, text "+Word", text s2]
     fosEmitMul s1 s2 = fosTargetCall [text s1, text "*Word", text s2]
-    fosEmitListLength obj = fosTargetCall [text "listLengthWord", obj]
+    fosEmitListLength obj = fosTargetCall [text "arrayLengthWord", obj]
     fosEmitReturn v = v
     fosEmitIO str = text str
     fosEmitBinder str = text str
@@ -332,7 +332,7 @@ targetFoster = TargetLanguage
               where arg n = text "v" <> text (show n)
                     args  = hsep $ map arg [0 .. fieldCount - 1]
 
-    fosCgSequenceType doc = parens (text "List" <+> doc)
+    fosCgSequenceType doc = parens (text "Array" <+> doc)
     fosCgFieldSlotType type_ =
         case type_ of
           Type_Void        -> return $ text "()"
