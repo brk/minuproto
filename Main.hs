@@ -181,7 +181,7 @@ targetHaskell = TargetLanguage
     hsOffsetType = text "Int"
     hsAtomCall (callee:txts) = parens (hsep (callee:txts))
 
-    hsMultiLineComment doc = group $ vsep [text "{-", doc, text "-}"]
+    hsMultiLineComment doc = group $ sep [text "{-", doc, text "-}"]
 
     hsLetbinds :: [(String, Doc)] -> Doc
     hsLetbinds bindings = vcat [text "let" <+> hsEmitBinder name <+> text "=" <+> body
@@ -289,7 +289,7 @@ targetFoster = TargetLanguage
                                               ,text "else" <+> elz]) <$> text "end")
     fosAtomCall (callee:txts) = parens (hsep (callee:txts))
 
-    fosMultiLineComment doc = group $ vsep [text "/*", doc, text "*/"]
+    fosMultiLineComment doc = group $ sep [text "/*", doc, text "*/"]
     fosOffsetType = text "Word"
     fosLetbinds :: [(String, Doc)] -> Doc
     fosLetbinds bindings = vcat $ punctuate (text ";") [fosEmitBinder name <+> text "=" <+> body
