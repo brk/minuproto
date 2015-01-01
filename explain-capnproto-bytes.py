@@ -26,7 +26,7 @@ def main():
 
         n = n + 1
 
-        m = re.match(r".?(\d{7}) ((?: [0-9a-f]{2})+)", line)
+        m = re.match(r".?([0-9a-f]{7}) ((?: [0-9a-f]{2})+)", line)
         try:
           offset_bytes = int(m.group(1), 16)
           offset_words = offset_bytes / 8
@@ -79,6 +79,9 @@ def interpretations_of(off_words, bytes_arr):
     if off_words in ptrsof:
         interps.append('ptr of ' + ptrsof[off_words])
 
+    if likely_ascii(bytes_arr):
+      interps.append("ascii: " + ''.join([chr(int(x, 16)) for x in bytes_arr]))
+
     if iL(0,2) == 1:
         offset = iL(2,30)
         target = "%07x" % ((off_words + offset + 1)*8)
@@ -86,6 +89,7 @@ def interpretations_of(off_words, bytes_arr):
             interps.append( {'type':'listptr', 'off':offset, 'tgt':target,
                             'tag':bitsM[29:29+3], 'nelts':iM(0, 29) } )
         else:
+          if not likely_ascii(bytes_arr):
             interps.append("list ptr, but offset seems bogus")
 
     if iL(0,2) == 0:
@@ -103,10 +107,20 @@ def interpretations_of(off_words, bytes_arr):
                             'datsz': datasz, 'ptrsz': ptrsiz
                             } )
         else:
+          if not likely_ascii(bytes_arr):
             interps.append("struct ptr, but offset seems bogus")
     return interps
 
+def likely_ascii(bytes):
+  too_many_zeros = count_zeros(bytes) >= len(bytes)/2
+  return all(likely_ascii_char(x) for x in bytes) and not too_many_zeros
 
+def count_zeros(strs):
+  return sum(1 if x == '00' else 0 for x in strs)
+
+def likely_ascii_char(s):
+  x = int(s, 16)
+  return x == 0 or (x > 20 and x < 120)
 
 def bits_of_hexdigit_char(d):
     return {

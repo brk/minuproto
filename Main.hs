@@ -250,7 +250,7 @@ targetHaskell = TargetLanguage
 
 --- }}}
 
-matchOrDie str alts = match str (alts ++ [(text "_", doerror $ "unable to match " ++ str)])
+matchOrDie str fnname alts = match str (alts ++ [(text "_", doerror $ "unable to match " ++ show fnname)])
 
 -- {{{ Encapsulation of Foster syntax
 targetFoster = TargetLanguage
@@ -355,6 +355,8 @@ targetFoster = TargetLanguage
           Type_Interface w -> liftM text (lookupId w)
           Type_Object      -> return $ text "<...object...>"
 
+fosEmitAdd64 s1 s2 = txCall [text s1, text "+Int64", text s2]
+fosEmitMul64 s1 s2 = txCall [text s1, text "*Int64", text s2]
 --- }}}
 
 -- {{{ CG monad
@@ -504,7 +506,8 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                                 doblock $ [
                                   letbinds [("absDiscrimOff", emitAdd "data_off"
                                                                 (show $ 2 * nodeStruct_discriminantOffset node))]
-                                  , matchOrDie "obj" [(fieldCtorName dname f <+> text "{}"
+                                  , matchOrDie "obj" fnname
+                                             [(fieldCtorName dname f <+> text "{}"
                                              ,doblock $ [srCall ["rabWriteWord16", "rab", "absDiscrimOff", show (fieldDiscriminant f)]]
                                                         ++ emitFieldSerializer dname f ++
                                                         (concatMap (emitFieldSerializer dname) indiscriminantFields))
@@ -623,12 +626,11 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
   let discriminatedFields =  [f | f <- nodeStruct_fields node, fieldDiscriminant f /= 0xffff]
   fieldAccessors <- mapM (emitGroupFieldAccessor dname indiscriminantFields) discriminatedFields
   let discoffb = nodeStruct_discriminantOffset node * 2
-  let args = [text "obj"]
-  return $  fnDefinition (text $ "mk" ++ dname) args noArgTys noRetTy (txCall [fnname, text "obj"])
-        <$> fnDefinition fnname [text "obj"] [text "Object"] (retTy $ text dname)
-                      (ifthen (srCall ["isDefaultObj", "obj"])
+  return $  fnDefinition (text $ "mk" ++ dname) [text "obj"] noArgTys noRetTy (txCall [fnname, text "obj"])
+        <$> fnDefinition fnname [text "objd"] [text "Object"] (retTy $ text dname)
+                      (ifthen (srCall ["isDefaultObj", "objd"])
                          (doerror $ "Unset value in non-optional field of type " ++ show dname)
-                         (matchOrDie "obj"
+                         (matchOrDie "objd" fnname
                             [(text "StructObj bs ptrs"
                              ,(match (show (extractData Type_UInt16 discoffb))
                                 [(pretty d, fieldAccessor)
@@ -637,21 +639,29 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
 
 emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
   let fnname = makerForType (Type_Struct nodeid)
+
   fieldAccessors <- mapM emitFieldAccessor (nodeStruct_fields node)
+  fieldAccessors' <- mapM (emitFieldAccessor' node) (nodeStruct_fields node)
   return $  fnDefinition (text $ "mk" ++ dname) [text "obj"] [text "Object"] (retTy $ text dname)
                          (txCall [fnname, text "obj"])
         <$> fnDefinition fnname [text "obj"] [text "Object"] (retTy $ text dname)
                          (ifthen (srCall ["isDefaultObj", "obj"])
                            (doerror $ "Unset value in non-optional field of type " ++ show dname)
-                           (matchOrDie "obj"
+                           (matchOrDie "obj" fnname
                               [(text "StructObj bs ptrs",
                                (doblock [txCall (text dname:fieldAccessors)]))]))
+        <$> fnDefinition (text $ "pr" ++ dname) [text "bs", text "segs", text "loc"]
+                                        [text "BytesSlice", text "List BytesSlice", text "Int64"] (retTy $ text dname)
+                         (txCall [text "parsePointee", text "bs", text "segs", makerForType' (Type_Struct nodeid), text "loc"])
+        <$> fnDefinition (makerForType' (Type_Struct nodeid)) [text "bs", text "segs", text "off"]
+                                        [text "BytesSlice", text "List BytesSlice", text "Int64"] (retTy $ text dname)
+                         (doblock [txCall (text dname:fieldAccessors')])
 
 emitNodeUnionBuilder node@(NodeEnum {}) dname nodeid = do
   let fnname = "mk_enum_" ++ show nodeid
   w16 <- cgFieldSlotType Type_UInt16
   return $  fnDefinition (text fnname) [emitBinder "wx"] [w16] (retTy $ text dname)
-                         (matchOrDie "wx"
+                         (matchOrDie "wx" fnname
                             [(text (show (enumerantOrder en))
                              ,text (capitalizeFirstLetter $ legalizeIdent $ enumerantName en))
                            | en <- nodeEnum_enumerants node])
@@ -661,25 +671,25 @@ emitNodeUnionBuilder other dname _ = do
   return $  fnDefinition (text fnname) [emitBinder "objx"] [text "Object"] (retTy $ text dname)
                          (srCall [dname, "objx"])
 
+-- {{{
 emitGroupFieldAccessor typename commonFields f = do
   accs <- mapM emitFieldAccessor (commonFields ++ [f])
   return $ txCall (fieldCtorName typename f : accs)
+
+emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
+  return $ txCall [makerForType (Type_Struct w), text "obj"]
 
 emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
   case kindOfType t of
     KindPtr -> do
       let offset = fromIntegral w
-      return $ extractPtr f (show t) t offset <+> comment (text (show t))
+      return $ extractPtr f (show t) t offset --  <+> comment (text (show t))
 
     KindData -> do
       let offset = fromIntegral w * byteSizeOfType t
-      return $ extractData t offset <+> comment (text (show t))
-
-emitFieldAccessor f | FieldGroup w <- fieldUnion f = do
-  return $ txCall [makerForType (Type_Struct w), text "obj"]
+      return $ extractData t offset --  <+> comment (text (show t))
 
 ------------------------------------------------------------------------
-
 extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
   let accessor = srCall [accessorNameForType t, show offset, "bs"] in
@@ -700,7 +710,7 @@ extractPtr f msg t offset =
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
  where
-   ptr = srCall ["lookupPointer", "ptrs", show offset] <+> comment (string msg)
+   ptr = srCall ["lookupPointer", "ptrs", show offset] -- <+> comment (string msg)
    wrapper d = if isFieldOptional f then text "_mkMaybe" <+> d -- Hardcoded juxtaposition syntax...
                                     else                     d
    extractPtrFunc t =
@@ -722,6 +732,84 @@ extractPtr f msg t offset =
         Type_UInt8       -> text "mk_Word8"
         Type_Int8        -> text "mk_Int8"
         _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+-- }}}
+------------------------------------------------------------------------
+
+emitFieldAccessor' _node f | FieldGroup w <- fieldUnion f = do
+  return $ text "emitFieldAccessor' fieldgroup" --txCall [makerForType (Type_Struct w), text "obj"]
+
+emitFieldAccessor' node f | FieldSlot w t v <- fieldUnion f = do
+  let numDataWords = nodeStruct_dataWordCount node -- :: Word16
+  let numPtrWords  = nodeStruct_pointerCount  node
+  case kindOfType t of
+    KindPtr -> do
+      let offset = fromIntegral w + fromIntegral numDataWords
+      return $ extractPtr' f (show t) t offset --  <+> comment (text (show t))
+
+    KindData -> do
+      let offset = fromIntegral w * byteSizeOfType t
+      return $ extractData' t offset --  <+> comment (text (show t))
+
+extractData' :: (?tgt::TargetLanguage) => Type_ -> Int -> Doc
+extractData' t offset =
+  let accessor = txCall [text (accessorNameForType t), fosEmitAdd64 (show $ fosEmitMul64 "8" "off") (show offset), text "bs"] in
+  case t of
+    Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
+    Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
+    _           -> accessor
+
+extractPtr' :: (?tgt::TargetLanguage) => Field -> String -> Type_ -> Int -> Doc
+extractPtr' f msg t offset =
+  let offset_ = offset in
+  parens $
+    case t of
+     Type_List Type_Void  -> txCall [text "parseVoidListFrom", text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+     Type_List Type_Bool  -> txCall [text "parseBitListFrom",  text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+     Type_List Type_UInt8 -> txCall [text "parseBytesFrom", text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+     Type_List      x     ->
+                      if isFieldOptional f
+                        then txCall [text "parseListFromMb", text "bs", text "segs", extractPtrFunc x, fosEmitAdd64 "off" (show offset_)]
+                        else txCall [text "parseListFrom  ", text "bs", text "segs", extractPtrFunc x, fosEmitAdd64 "off" (show offset_)]
+     Type_Struct    _     ->
+                      if isFieldOptional f
+                        then txCall [text "parsePointeeMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
+                        else txCall [text "parsePointee  ", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
+     Type_Text        ->
+                      if isFieldOptional f
+                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "bs", text "segs", fosEmitAdd64 "off" (show offset)]
+     Type_Data        ->
+                      if isFieldOptional f
+                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+     Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
+     Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
+     _ -> error $ "extractPtr saw unexpected type " ++ show t
+ where
+   extractPtrFunc t =
+     case t of
+        Type_Text        -> text "prText"
+        Type_Data        -> text "prBytes"
+        Type_List      x -> error $ "xPF List of " ++ show x
+        Type_Struct    _ -> makerForType' t
+        Type_Interface _ -> error "xPF Interface"
+        Type_Object      -> error "xPF Object"
+        Type_Void        -> error "xPF Void"
+        Type_Bool        -> error "xPF Bool"
+        Type_UInt64      -> text "pr_Word64"
+        Type_Int64       -> text "pr_Int64"
+        Type_UInt32      -> text "pr_Word32"
+        Type_Int32       -> text "pr_Int32"
+        Type_UInt16      -> text "pr_Word16"
+        Type_Int16       -> text "pr_Int16"
+        Type_UInt8       -> text "pr_Word8"
+        Type_Int8        -> text "pr_Int8"
+        _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+
+makerForType' (Type_Enum   w) = text $ "pr_enum_"   ++ show w
+makerForType' (Type_Struct w) = text $ "pr_struct_" ++ show w
+makerForType' other = error $ "makerForType " ++ show other
+
 -- }}}
 
 makerForType (Type_Enum   w) = text $ "mk_enum_"   ++ show w

@@ -27,6 +27,8 @@ import Data.ByteString(ByteString)
 import Data.Char(chr, toUpper)
 import Data.List((!!), foldl')
 
+import Numeric
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
@@ -54,6 +56,197 @@ instance Show a => Show (StrictMaybe a) where
   show  StrictlyNone    =  "StrictlyNone"
   show (StrictlyJust v) = "(StrictlyJust " ++ show v ++ ")"
 
+---------------------------------------------------------------------
+type List t = [t]
+
+data ListEltSizeAlt
+  = LESA_Phantom
+  | LESA_Bit
+  | LESA_Byte1
+  | LESA_Byte2
+  | LESA_Byte4
+  | LESA_Word
+  | LESA_Ptr
+  | LESA_Composite Int -- // data+ptr words
+
+
+pr_Word64 bs segs idx = bs64  idx bs
+pr_Word32 bs segs idx = bs64  idx bs
+pr_Word16 bs segs idx = bs64  idx bs
+pr_Word8  bs segs idx = bs64  idx bs
+pr_Int64  bs segs idx = bs64i idx bs
+pr_Int32  bs segs idx = bs64i idx bs
+pr_Int16  bs segs idx = bs64i idx bs
+pr_Int8   bs segs idx = bs64i idx bs
+
+
+getTargetOffsetOfPtr_ bs segs o =
+  let w = bs `wordS` o in
+  let (tag, w0) = splitU 2 w in
+
+  case tag of
+       0 -> let (b, w1) = splitS 30 w0 in
+            (,) bs (fromIntegral b + o + 1)
+       1 -> 
+            let (b, w1) = splitS 30 w0 in
+            (,) bs (fromIntegral b + o + 1)
+       2 ->
+            let ( b, w1) = splitU 1 w0 in
+            let ( c, w2) = splitU 29 w1 in
+            let ( d, w3) = splitU 32 w2 in
+            if b == 0
+              then let bs_ = lookupSegment segs (fromIntegral d) ("getTargetOffsetOfPtr_ o=" ++ show o ++ "; w =" ++ showHex w "") in
+                   getTargetOffsetOfPtr_ bs_ segs (fromIntegral c)
+              else error $ "getTargetOffsetOfPtr_ can't yet support doubly-indirect pointers."
+       _ -> error $ "saw unknown ptr instead of struct ptr"
+
+prText bs segs loc =
+  (dropLastByte $ parseBytesFrom bs segs loc, ())
+
+prBytes bs segs loc = parseBytesFrom bs segs loc
+
+--parseBytesFrom :: { ByteString => List ByteString => Int64 => ByteString };
+parseBytesFrom :: ByteString -> List ByteString -> Int64 -> ByteString
+parseBytesFrom bs segs o =
+  let w = bs `wordS` o in
+  let (tag, w0) = splitU 2 w in
+  case tag of
+       0 ->
+            error $ "parseBytesFrom saw struct ptr instead of list ptr"
+       1 ->
+            let (b, w1) = splitS 30 w0 in
+            let (c, w2) = splitU 3  w1 in
+            let (d, w3) = splitU 29 w2 in
+            let target_off = fromIntegral b + o + 1 in
+            let numelts = fromIntegral d in
+
+            slice (fromIntegral $ target_off * 8) numelts bs
+       2 ->
+            let (b, w1) = splitU 1 w0 in
+            let (c, w2) = splitU 29 w1 in
+            let (d, w3) = splitU 32 w2 in
+            if b == 0
+              then let bs_ = lookupSegment segs (fromIntegral d) ("parseBytesFrom o=" ++ show o ++ "; w =" ++ showHex w "") in
+                   parseBytesFrom bs_ segs (fromIntegral c)
+              else 
+                   error $ "parseBytesFrom can't yet support doubly-indirect pointers."
+       _ -> 
+            error $ "saw unknown ptr instead of list ptr"
+
+-- parsePointee :: forall t:Type, { ByteString => List ByteString => { ByteString => List ByteString => Int64 => t } => Int64 => t };
+parsePointee bs segs pr loc =
+  let (bs_, loc_) = getTargetOffsetOfPtr_ bs segs loc in
+  pr bs_ segs loc_
+
+-- parsePointeeMb :: forall t:Type, { ByteString => List ByteString => { ByteString => List ByteString => Int64 => t } => Int64 => StrictMaybe t };
+parsePointeeMb bs segs pr loc =
+  if (bs `wordS` loc) == 0
+    then StrictlyNone
+    else
+      let (bs_, off_) = getTargetOffsetOfPtr_ bs segs loc in
+      StrictlyJust (pr bs_ segs off_)
+
+--parsePointerMb :: forall t:Type, { ByteString => List ByteString => { ByteString => List ByteString => Int64 => t } => Int64 => StrictMaybe t };
+parsePointerMb  bs segs pr loc =
+  if (bs `wordS` loc) == 0
+    then StrictlyNone
+    else StrictlyJust (pr bs segs loc)
+
+--parseVoidListFrom :: { ByteString => List ByteString => Int64 => Array () };
+parseVoidListFrom  bs segs o =
+  let (bs_, target_off, tag, numelts) = parseListPointerAt_ bs segs o in
+  [() | n <- zeroto numelts]
+
+--parseBitListFrom :: { ByteString => List ByteString => Int64 => Array Bool };
+parseBitListFrom bs_ segs o =
+  let (bs, target_off, tag, numelts) = parseListPointerAt_ bs_ segs o in
+  let boff = target_off * 8 in
+  [readNthBitS bs boff n | n <- zeroto numelts]
+
+parseListFromMb bs_ segs pr o_ =
+  let (bs, target_off, tag, numelts) = parseListPointerAt_ bs_ segs o_ in
+  if (bs `wordS` target_off) == 0
+    then StrictlyNone
+    else StrictlyJust (parseListFrom bs segs pr target_off)
+
+parseListFrom bs_ segs pr o_ =
+  let (bs, target_off, tag, numelts) = parseListPointerAt_ bs_ segs o_ in
+  if (bs `wordS` target_off) == 0
+    then []
+    else
+      let boff = target_off * 8 in
+      case tag of
+        LESA_Phantom -> error $ "parseListFrom invariant violated"
+        LESA_Bit     -> error $ "parseListFrom invariant violated"
+        LESA_Byte1   -> [pr bs segs (boff + (1 * (fromIntegral numelts))) | n <- zeroto numelts]
+        LESA_Byte2   -> [pr bs segs (boff + (2 * (fromIntegral numelts))) | n <- zeroto numelts]
+        LESA_Byte4   -> [pr bs segs (boff + (4 * (fromIntegral numelts))) | n <- zeroto numelts]
+        LESA_Word    -> [pr bs segs (boff + (8 * (fromIntegral numelts))) | n <- zeroto numelts]
+        LESA_Ptr     -> [pr bs segs (target_off + (fromIntegral n)) | n <- zeroto numelts]
+        LESA_Composite sz -> [pr bs segs (target_off + (fromIntegral n * fromIntegral sz))
+                             | n <- zeroto numelts]
+
+--lesaFor :: { Int64 => (Int32, Int32) => ListEltSizeAlt };
+lesaFor tag tagptr =
+  case (tag, tagptr) of
+    (0, _) -> LESA_Phantom
+    (1, _) -> LESA_Bit
+    (2, _) -> LESA_Byte1
+    (3, _) -> LESA_Byte2
+    (4, _) -> LESA_Byte4
+    (5, _) -> LESA_Word
+    (6, _) -> LESA_Ptr
+    (7, (_, words)) -> LESA_Composite words
+    _ -> error $ "unknown list size tag"
+
+parseListPointerAt_ bs segs o =
+  let w = bs `wordS` o in
+  let (tag, w0) = splitU 2 w in
+  case tag of
+       0 ->
+        if w == 0
+          then
+            (bs, o, LESA_Phantom, 0)
+          else
+            error $ "parseListPointerAt_ saw struct ptr instead    list ptr"
+       1 ->
+            let (b, w1) = splitS 30 w0 in
+            let (c, w2) = splitU 3  w1 in
+            let (d, w3) = splitU 29 w2 in
+
+            let list_target_offset = fromIntegral b + o + 1 in
+            let tagword = bs `wordS` list_target_offset in
+            let tagptr = parseListTagPointer_ tagword in
+            if c == 7
+              then
+                let (numelts, _) = tagptr in
+                (bs, (list_target_offset + 1), (lesaFor c tagptr), numelts)
+              else
+                let numelts = d in
+                (bs, (list_target_offset    ), (lesaFor c tagptr), numelts)
+
+       2 ->
+            let (b, w1) = splitU 1 w0 in
+            let (c, w2) = splitU 29 w1 in
+            let (d, w3) = splitU 32 w2 in
+            if b == 0
+              then let bs_ = lookupSegment segs (fromIntegral d) ("parseListPointerAt_ o=" ++ show o ++ "; w =" ++ showHex w "") in
+                   parseListPointerAt_ bs_ segs (fromIntegral c)
+              else error $ "parseListPointerAt_ can't yet support doubly-indirect pointers."
+       _ -> 
+            error $ "saw unknown ptr instead    list ptr"
+
+parseListTagPointer_  w =
+  let (_, w0) = splitU 2 w   in
+  let (b, w1) = splitU 30 w0 in
+  let (c, w2) = splitU 16 w1 in
+  let (d, w3) = splitU 16 w2 in
+  -- (b |> trunc_i64_to_i32) ((c +Int64 d) |> trunc_i64_to_i32); 
+  (fromIntegral b, fromIntegral (c + d))
+
+readNthBitS bs boff n =
+  let !(byteoff, bitoff) = (fromIntegral n) `divMod` 8 in
+  readBitOfByte bitoff (boff + fromIntegral byteoff) bs
 ---------------------------------------------------------------------
 
 wordLE :: (Integral a, Integral b, Bits b) => Int -> a -> a -> b
@@ -119,27 +312,13 @@ plusOffset = (+)
 mulOffset :: Offset -> Offset -> Offset
 mulOffset = (*)
 
-newtype WordOffset = WordOffset Int64 deriving (Show, Eq, Ord)
-newtype ByteOffset = ByteOffset Int64 deriving (Show, Eq, Ord)
+wordS :: ByteString -> Int64 -> Word64
+wordS !bs !nw = bs64 (8 * nw) bs
 
-unWordOffset (WordOffset i) = i
+word :: ByteString -> Int64 -> Word64
+word !bs !nw =                bs64 (8 * nw) bs
 
-liftWordOffset1 op (WordOffset a) = WordOffset (op a)
-liftWordOffset2 op (WordOffset a) (WordOffset b) = WordOffset (op a b)
-
-instance Num WordOffset where
-  (+)    = liftWordOffset2 (+)
-  (-)    = liftWordOffset2 (-)
-  (*)    = liftWordOffset2 (*)
-  negate = liftWordOffset1 negate
-  abs    = liftWordOffset1 abs
-  signum = liftWordOffset1 signum
-  fromInteger i = WordOffset $ fromInteger i
-
-word :: ByteString -> WordOffset -> Word64
-word !bs !(WordOffset nw) =                bs64 (8 * nw) bs
-
-byte !bs !(ByteOffset nb) = fromIntegral $ bs8  nb bs
+byte !bs !nb = fromIntegral $ bs8  nb bs
 
 slice !off !len !bs = BS.take (fromIntegral len) (BS.drop (fromIntegral off) bs)
 sliceWords !off !len !bs = slice (8 * off) (8 * len) bs
@@ -171,21 +350,24 @@ splitSegments rawbytes =
           ++ "\n;; input bytes length " ++ show (BS.length rawbytes)) $
     segs
 
-data Pointer = StructPtr !ByteString !String     !WordOffset !Word64      !Word64 -- PointsInto, Origin, Offset, # data words, # ptr words
-             | ListPtr   !ByteString !WordOffset !WordOffset !ListEltSize !Word64 -- PointsInto, Origin, Offset, eltsize, # elts
+data Pointer = StructPtr !ByteString !String     !Int64 !Word64      !Word64 -- PointsInto, Origin, Offset, # data words, # ptr words
+             | ListPtr   !ByteString !Int64 !Int64 !ListEltSize !Word64 -- PointsInto, Origin, Offset, eltsize, # elts
+             | InvalidPtr String Int64
 
 instance Show Pointer where
   show (StructPtr _ _ off ndw npw) = "(StructPtr " ++ show ndw ++ " " ++ show npw ++ ")"
-  show (ListPtr   _ orig off eltsz nelts) = "(ListPtr " ++ show orig ++ " " ++ show off ++ " " ++ show nelts ++ ")"
+  show (ListPtr   _ orig off eltsz nelts) = "(ListPtr " ++ show orig ++ " " ++ show off ++ " " ++ show nelts ++ " " ++ show eltsz ++ ")"
+  show (InvalidPtr orig  off ) = "(InvalidPtr " ++ show orig ++ " " ++ show off ++ ")"
 
 data FlatObj = StructFlat !ByteString ![Pointer]
-             | ListFlat   ![FlatObj]
+             | ListFlat   ![FlatObj]    Pointer
              | StrFlat    !String
              | BytesFlat  !ByteString
+             | InvalidFlat String
              deriving Show
 
 data Object = StructObj  !ByteString ![Object]
-            | ListObj    ![Object]
+            | ListObj    ![Object]      Pointer
             | StrObj     !String
             | BytesObj   !ByteString
             | InvalidObj !String
@@ -236,14 +418,14 @@ mk_Int8 (BytesObj bs) = bs8i 0 bs
 
 instance Pretty Object where
   pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"
-  pretty (ListObj         []     ) = text "{[]}"
+  pretty (ListObj         []   _ ) = text "{[]}"
   pretty (StructObj bs    objects) = parens $ text "StructObj" <$> indent 4 (text $ show bs)
                                                                <$> indent 4 (pretty objects)
-  pretty (ListObj         objects) = parens $ text "ListObj"   <+> indent 4 (pretty objects)
+  pretty (ListObj         objects _) = parens $ text "ListObj"   <+> indent 4 (pretty objects)
   pretty (InvalidObj          str) = parens $ text "InvalidObj:" <+> text str
   pretty (StrObj              str) = text (show str)
 
-parseUnknownPointerAt :: String -> ByteString -> [ByteString] -> WordOffset -> Pointer
+parseUnknownPointerAt :: String -> ByteString -> [ByteString] -> Int64 -> Pointer
 parseUnknownPointerAt msg bs segs o =
  --trace ("parseUnknownPointerAt " ++ show o ++ " " ++ msg) $
   let !w = bs `word` o in
@@ -254,27 +436,27 @@ parseUnknownPointerAt msg bs segs o =
     2 -> parseInterSegmentPointerAt bs segs o
     _ -> error $ "parseUnknownPointer: " ++ show ptrtag ++ " At: " ++ show o
 
-parseStructPointerAt :: ByteString -> WordOffset -> Pointer
+parseStructPointerAt :: ByteString -> Int64 -> Pointer
 parseStructPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
   let !(!b, w1) = splitS 30 w0 in
   let !(!c, w2) = splitU 16 w1 in
   let !(!d, w3) = splitU 16 w2 in
-  StructPtr bs (show o) (WordOffset b + o + 1) c d
+  StructPtr bs (show o) (b + o + 1) c d
 
 w2i :: Word64 -> Int64
 w2i = fromIntegral
 
 derefStructPointer :: Pointer -> [ByteString] -> FlatObj
 derefStructPointer (StructPtr bs origin off numdata numptrs) segs =
-  StructFlat (sliceWords (unWordOffset off) numdata bs)
-             [parseUnknownPointerAt ("fromstruct@" ++ origin) bs segs (off + WordOffset (w2i n))
+  StructFlat (sliceWords off numdata bs)
+             [parseUnknownPointerAt ("fromstruct@" ++ origin) bs segs (off + (w2i n))
                | n <- numdata `upby` numptrs]
 
 readUnknownPointerAt o bs segs = derefUnknownPointer segs (parseUnknownPointerAt "readUnknownPointerAt" bs segs o)
 
-parseListTagPointerAt :: ByteString -> WordOffset -> (Word64, Word64, Word64)
+parseListTagPointerAt :: ByteString -> Int64 -> (Word64, Word64, Word64)
 parseListTagPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
@@ -303,14 +485,14 @@ lesFor 6 _ = LES_Ptr
 lesFor 7 (_, dw, pw) = LES_Composite dw pw
 lesFor _ _ = error "unkonnw list size tag"
 
-parseListPointerAt :: ByteString -> WordOffset -> Pointer
+parseListPointerAt :: ByteString -> Int64 -> Pointer
 parseListPointerAt bs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
   let !(!b, w1) = splitS 30 w0 in
   let !(!c, w2) = splitU 3  w1 in
   let !(!d, w3) = splitU 29 w2 in
-  let !list_target_offset = WordOffset b + o + 1 in
+  let !list_target_offset = b + o + 1 in
   let !tagptr = parseListTagPointerAt bs list_target_offset in
   let !numelts = if c == 7 then let (ne, _, _) = tagptr in ne else d in
   -- b is the "Offset, in words, from the end of the pointer to the
@@ -324,7 +506,7 @@ zeroto n =
 
 upby k n = map (+k) (zeroto n)
 
-byteOffsetOf (WordOffset o) = o * 8
+byteOffsetOf o = o * 8
 
 charOfBool b = if b then '1' else '0'
 
@@ -335,35 +517,35 @@ readNthBit bs boff n =
 readBitOfByte :: Int64 -> Int64 -> ByteString -> Bool
 readBitOfByte bit byt bs =
   let !mask = (shiftL 1 (fromIntegral bit)) :: Int64 in
-  ((byte bs (ByteOffset byt)) .&. mask) == mask
+  ((byte bs byt) .&. mask) == mask
 
 derefListPointer :: Pointer -> [ByteString] -> FlatObj
 derefListPointer ptr@(ListPtr bs origin off eltsize numelts) segs =
   let !boff = byteOffsetOf off in
   case eltsize of
-    LES_Phantom -> ListFlat (replicate (fromIntegral numelts) (StructFlat BS.empty []))
-    LES_Bit     -> ListFlat [StrFlat [charOfBool (readNthBit bs boff n)] | n <- zeroto numelts]
+    LES_Phantom -> ListFlat (replicate (fromIntegral numelts) (StructFlat BS.empty [])) ptr
+    LES_Bit     -> ListFlat [StrFlat [charOfBool (readNthBit bs boff n)] | n <- zeroto numelts] ptr
     LES_Byte1   -> BytesFlat (slice boff numelts bs)
-    LES_Byte2   -> ListFlat [BytesFlat (slice (8 * unWordOffset off + 2 * n) 2 bs) | n <- zeroto numelts]
-    LES_Byte4   -> ListFlat [BytesFlat (slice (8 * unWordOffset off + 4 * n) 4 bs) | n <- zeroto numelts]
-    LES_Word    -> ListFlat [BytesFlat (sliceWords (unWordOffset off + n) 1 bs)    | n <- zeroto numelts]
+    LES_Byte2   -> ListFlat [BytesFlat (slice (8 * off + 2 * n) 2 bs) | n <- zeroto numelts] ptr
+    LES_Byte4   -> ListFlat [BytesFlat (slice (8 * off + 4 * n) 4 bs) | n <- zeroto numelts] ptr
+    LES_Word    -> ListFlat [BytesFlat (sliceWords (off + n) 1 bs)    | n <- zeroto numelts] ptr
     LES_Ptr     -> ListFlat [derefUnknownPointer segs (parseUnknownPointerAt "derefListPtr" bs segs
-                                                            (off + WordOffset n)) | n <- zeroto numelts]
+                                                            (off + n)) | n <- zeroto numelts] ptr
     LES_Composite dw pw ->
       let offsets = [off + (fromIntegral $ i * (dw + pw)) | i <- zeroto numelts] in
-      ListFlat [derefStructPointer (StructPtr bs ("LES_Composite: " ++ show ptr ++ ";" ++ show off') off' dw pw) segs | off' <- offsets]
+      ListFlat [derefStructPointer (StructPtr bs ("LES_Composite: " ++ show ptr ++ ";" ++ show off') off' dw pw) segs | off' <- offsets] ptr
 
-lookupSegment segs idx =
+lookupSegment segs idx msg =
   if idx < length segs
     then segs !! idx
-    else error $ "Minuproto.hs: lookupSegment cannot get " ++ show idx ++ "'th out of " ++ show (length segs) ++ " segments."
+    else error $ "Minuproto.hs: lookupSegment cannot get " ++ show idx ++ "'th out of " ++ show (length segs) ++ " segments." ++ "\n" ++ msg
 
 lookupPointer ptrs idx =
   if idx < length ptrs
     then ptrs !! idx
     else error $ "Minuproto.hs: lookupPointer cannot get " ++ show idx ++ "'th out of " ++ show (length ptrs) ++ " pointers."
 
-parseInterSegmentPointerAt :: ByteString -> [ByteString] -> WordOffset -> Pointer
+parseInterSegmentPointerAt :: ByteString -> [ByteString] -> Int64 -> Pointer
 parseInterSegmentPointerAt bs segs o =
   let !w = bs `word` o in
   let !(_a, w0) = splitU 2 w in
@@ -371,24 +553,26 @@ parseInterSegmentPointerAt bs segs o =
   let !(!c, w2) = splitU 29 w1 in
   let !(!d, w3) = splitU 32 w2 in
   if b == 0
-    then let bs' = lookupSegment segs (fromIntegral d) in
-         let pp = parseUnknownPointerAt "<<parseInterSegmentPointerAt>>" bs' segs (WordOffset (fromIntegral c)) in
+    then let bs' = lookupSegment segs (fromIntegral d) ("parseInterSegmentPointerAt o=" ++ show o ++ "; w=" ++ showHex w "") in
+         let pp = parseUnknownPointerAt "<<parseInterSegmentPointerAt>>" bs' segs (fromIntegral c) in
          -- trace ("parseInterSegmentPointerAt " ++ show o ++ "; " ++ show d ++ " " ++ show pp) $ pp
          pp
-    else error $ "parseInterSegmentPointerAt can't yet support doubly-indirect pointers."
+    else InvalidPtr ("parseInterSegmentPointerAt can't yet support doubly-indirect pointers. " ++ show o ++ " : " ++ showHex w "" ++ " //@902 " ++ show (bs `word` 902)) o
 
 unflatten :: Int -> [ByteString] -> FlatObj -> Object
 unflatten 0 _ flat = InvalidObj $ "no gas left for " ++ show flat
 unflatten n segs (StructFlat words ptrs) = StructObj words (map (derefUnknownPointer' (n - 1) segs) ptrs)
-unflatten n segs (ListFlat   flats) =        ListObj       (map (unflatten (n - 1) segs) flats)
+unflatten n segs (ListFlat   flats p) =       ListObj       (map (unflatten (n - 1) segs) flats) p
 unflatten _ _    (StrFlat    str)   =         StrObj str
 unflatten _ _    (BytesFlat  bs )   =       BytesObj bs
+unflatten _ _    (InvalidFlat str)  =      InvalidObj str
 
 derefUnknownPointer :: [ByteString] -> Pointer -> FlatObj
 derefUnknownPointer segs ptr =
   case ptr of
     StructPtr {} -> derefStructPointer ptr segs
     ListPtr   {} -> derefListPointer   ptr segs
+    InvalidPtr str _ -> InvalidFlat str
 
 derefUnknownPointer' :: Int -> [ByteString] -> Pointer -> Object
 derefUnknownPointer' n segs ptr =
@@ -411,7 +595,7 @@ updateNextOffset rab prevoffset = do
   return $ max prevoffset (fromIntegral nextoffset)
 
 mapL :: (Object -> t) -> Object -> [t]
-mapL f (ListObj vals) = map f vals
+mapL f (ListObj vals _) = map f vals
 mapL _ (StructObj bs []) | BS.null bs = []
 mapL _ (StrObj "") = []
 mapL f other = error $ "mapL can't map over " ++ show (pretty other) ++ " which is " ++ show other
@@ -485,7 +669,7 @@ sr_Type_Data val rab data_off nextoffset = rabWriteBytes rab data_off val
 padbyte_offsets o n = [o.. o + n]
 
 isDefaultObj (StructObj bs []) = BS.length bs == 0
-isDefaultObj (ListObj      []) = True
+isDefaultObj (ListObj      [] _) = True
 isDefaultObj _ = False
 
 _mkMaybe :: (Object -> a) -> Object -> StrictMaybe a
