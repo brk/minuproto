@@ -102,6 +102,10 @@ emitAdd         :: (?tgt::TargetLanguage) => String -> String -> Doc
 emitAdd         = _targetEmitAdd ?tgt
 emitMul         :: (?tgt::TargetLanguage) => String -> String -> Doc
 emitMul         = _targetEmitMul ?tgt
+emitAdd64       :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitAdd64       = _targetEmitAdd64 ?tgt
+emitMul64       :: (?tgt::TargetLanguage) => String -> String -> Doc
+emitMul64       = _targetEmitMul64 ?tgt
 emitListLength  :: (?tgt::TargetLanguage) => Doc -> Doc
 emitListLength  = _targetEmitListLength ?tgt
 emitReturn      :: (?tgt::TargetLanguage) => Doc -> Doc
@@ -135,7 +139,9 @@ data TargetLanguage = TargetLanguage {
   , _targetLetbinds         :: [(String, Doc)] -> Doc
   , _targetFnDefinition     :: Doc -> [Doc] -> [Doc] -> Doc -> Doc -> Doc
   , _targetEmitAdd          :: String -> String -> Doc
+  , _targetEmitAdd64        :: String -> String -> Doc
   , _targetEmitMul          :: String -> String -> Doc
+  , _targetEmitMul64        :: String -> String -> Doc
   , _targetEmitListLength   :: Doc    -> Doc
   , _targetEmitReturn       :: Doc    -> Doc
   , _targetEmitIO           :: String -> Doc
@@ -152,8 +158,8 @@ targetHaskell = TargetLanguage
                   hsTargetHeader hsTargetFilename hsTargetCall
                   hsAtomCall hsDoblock hsDoerror hsMatch
                   hsIfthen hsOffsetType hsMultiLineComment
-                  hsLetbinds hsFnDefinition hsEmitAdd
-                  hsEmitMul hsEmitListLength hsEmitReturn hsEmitIO
+                  hsLetbinds hsFnDefinition hsEmitAdd hsEmitAdd64
+                  hsEmitMul hsEmitMul64 hsEmitListLength hsEmitReturn hsEmitIO
                   hsEmitBinder hsEmitRebind hsCgSequenceType
                   hscgFieldSlotType hsCgDataType
   where
@@ -167,6 +173,7 @@ targetHaskell = TargetLanguage
                           , text "import Data.Word"
                           , text "import Data.Int"
                           , text "import Data.Text(Text)"
+                          , text "type BytesSlice = ByteString"
                           , empty
                           ]
     hsTargetCall (callee:docs) = group $ parens (callee <+> align (vsep docs))
@@ -189,6 +196,8 @@ targetHaskell = TargetLanguage
 
     hsEmitAdd s1 s2 = hsTargetCall [text s1, text "`plusOffset`", text s2]
     hsEmitMul s1 s2 = hsTargetCall [text s1, text "`mulOffset`",  text s2]
+    hsEmitAdd64 s1 s2 = hsTargetCall [text s1, text "+", text s2]
+    hsEmitMul64 s1 s2 = hsTargetCall [text s1, text "*",  text s2]
     hsEmitListLength obj = hsTargetCall [text "fromIntegral", hsTargetCall [text "length", obj]]
     hsEmitReturn v = text "return" <+> v
     hsEmitIO str = text $ "IO " ++ str
@@ -257,8 +266,8 @@ targetFoster = TargetLanguage
                   fosTargetHeader fosTargetFilename fosTargetCall
                   fosAtomCall fosDoblock fosDoerror fosMatch
                   fosIfthen fosOffsetType fosMultiLineComment
-                  fosLetbinds fosFnDefinition fosEmitAdd
-                  fosEmitMul fosEmitListLength fosEmitReturn fosEmitIO
+                  fosLetbinds fosFnDefinition fosEmitAdd fosEmitAdd64
+                  fosEmitMul fosEmitMul64 fosEmitListLength fosEmitReturn fosEmitIO
                   fosEmitBinder fosEmitRebind fosCgSequenceType
                   fosCgFieldSlotType fosCgDataType
   where
@@ -297,6 +306,8 @@ targetFoster = TargetLanguage
 
     fosEmitAdd s1 s2 = fosTargetCall [text s1, text "+Word", text s2]
     fosEmitMul s1 s2 = fosTargetCall [text s1, text "*Word", text s2]
+    fosEmitAdd64 s1 s2 = fosTargetCall [text s1, text "+Int64", text s2]
+    fosEmitMul64 s1 s2 = fosTargetCall [text s1, text "*Int64", text s2]
     fosEmitListLength obj = fosTargetCall [text "arrayLengthWord", obj]
     fosEmitReturn v = v
     fosEmitIO str = text str
@@ -355,8 +366,6 @@ targetFoster = TargetLanguage
           Type_Interface w -> liftM text (lookupId w)
           Type_Object      -> return $ text "<...object...>"
 
-fosEmitAdd64 s1 s2 = txCall [text s1, text "+Int64", text s2]
-fosEmitMul64 s1 s2 = txCall [text s1, text "*Int64", text s2]
 --- }}}
 
 -- {{{ CG monad
@@ -752,7 +761,7 @@ emitFieldAccessor' node f | FieldSlot w t v <- fieldUnion f = do
 
 extractData' :: (?tgt::TargetLanguage) => Type_ -> Int -> Doc
 extractData' t offset =
-  let accessor = txCall [text (accessorNameForType t), fosEmitAdd64 (show $ fosEmitMul64 "8" "off") (show offset), text "bs"] in
+  let accessor = txCall [text (accessorNameForType t), emitAdd64 (show $ emitMul64 "8" "off") (show offset), text "bs"] in
   case t of
     Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
@@ -763,25 +772,25 @@ extractPtr' f msg t offset =
   let offset_ = offset in
   parens $
     case t of
-     Type_List Type_Void  -> txCall [text "parseVoidListFrom", text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
-     Type_List Type_Bool  -> txCall [text "parseBitListFrom",  text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
-     Type_List Type_UInt8 -> txCall [text "parseBytesFrom", text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+     Type_List Type_Void  -> txCall [text "parseVoidListFrom", text "bs", text "segs", emitAdd64 "off" (show offset_)]
+     Type_List Type_Bool  -> txCall [text "parseBitListFrom",  text "bs", text "segs", emitAdd64 "off" (show offset_)]
+     Type_List Type_UInt8 -> txCall [text "parseBytesFrom", text "bs", text "segs", emitAdd64 "off" (show offset_)]
      Type_List      x     ->
                       if isFieldOptional f
-                        then txCall [text "parseListFromMb", text "bs", text "segs", extractPtrFunc x, fosEmitAdd64 "off" (show offset_)]
-                        else txCall [text "parseListFrom  ", text "bs", text "segs", extractPtrFunc x, fosEmitAdd64 "off" (show offset_)]
+                        then txCall [text "parseListFromMb", text "bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
+                        else txCall [text "parseListFrom  ", text "bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
      Type_Struct    _     ->
                       if isFieldOptional f
-                        then txCall [text "parsePointeeMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
-                        else txCall [text "parsePointee  ", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
+                        then txCall [text "parsePointeeMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [text "parsePointee  ", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
      Type_Text        ->
                       if isFieldOptional f
-                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
-                        else txCall [extractPtrFunc t, text "bs", text "segs", fosEmitAdd64 "off" (show offset)]
+                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "bs", text "segs", emitAdd64 "off" (show offset)]
      Type_Data        ->
                       if isFieldOptional f
-                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, fosEmitAdd64 "off" (show offset_)]
-                        else txCall [extractPtrFunc t, text "bs", text "segs", fosEmitAdd64 "off" (show offset_)]
+                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "bs", text "segs", emitAdd64 "off" (show offset_)]
      Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
