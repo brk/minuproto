@@ -2,6 +2,8 @@
 -- vim: set foldmethod=marker
 module Main where
 
+import Prelude hiding ((<$>))
+
 import Minuproto
 import MinuprotoBootstrap
 import ResizableArrayBuilder
@@ -740,7 +742,8 @@ extractPtr f msg t offset =
         Type_Int16       -> text "mk_Int16"
         Type_UInt8       -> text "mk_Word8"
         Type_Int8        -> text "mk_Int8"
-        _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+        Type_Float64     -> text "mk_Float64"
+        _ -> error $ "(746)extractPtrFunc saw unexpected type " ++ show t
 -- }}}
 ------------------------------------------------------------------------
 
@@ -813,7 +816,8 @@ extractPtr' f msg t offset =
         Type_Int16       -> text "pr_Int16"
         Type_UInt8       -> text "pr_Word8"
         Type_Int8        -> text "pr_Int8"
-        _ -> error $ "extractPtrFunc saw unexpected type " ++ show t
+        Type_Float64     -> text "pr_Float64"
+        _ -> error $ "(818)extractPtrFunc saw unexpected type " ++ show t
 
 makerForType' (Type_Enum   w) = text $ "pr_enum_"   ++ show w
 makerForType' (Type_Struct w) = text $ "pr_struct_" ++ show w

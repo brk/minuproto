@@ -11,7 +11,6 @@ import Data.Int
 
 import Data.Primitive.ByteArray
 import Data.Primitive.Types(Addr(Addr))
-import Data.ByteString.Internal
 import Data.ByteString.Unsafe
 
 type RABOffset = Int
@@ -28,7 +27,14 @@ rabToByteString (ResizableArrayBuilder rcap rsiz) = do
     else case v of V.MVector _off _len mba -> do
                      pba <- newPinnedByteArray s
                      copyMutableByteArray pba 0 mba 0 s
-                     let !(Addr addr_) = mutableByteArrayContents pba
+
+                     writeIORef rcap (V.MVector _off _len pba)
+
+                     -- At first I tried using the copied bytes as the contents
+                     -- of the packed bytestring, but the seemingly-correct thing
+                     -- of freezing pba and then getting its contents did not
+                     -- actually preserve referential transparency.
+                     let !(Addr addr_) = mutableByteArrayContents mba
                      unsafePackAddressLen s addr_
 
 rabPadToAlignment rab align = do
@@ -57,7 +63,7 @@ newResizableArrayBuilder = do
   return $ ResizableArrayBuilder rcap rsiz
 
 rabGrowToLimit :: ResizableArrayBuilder -> RABOffset -> IO ()
-rabGrowToLimit (ResizableArrayBuilder rcap rsiz) lim = do
+rabGrowToLimit (ResizableArrayBuilder rcap _rsiz) lim = do
   v0 <- readIORef rcap
   let !v0len = V.length v0
   let !newlen = fromIntegral $ grow (fromIntegral v0len) where grow v = if v <= lim then grow (2 * v) else v
@@ -67,8 +73,11 @@ rabGrowToLimit (ResizableArrayBuilder rcap rsiz) lim = do
   writeIORef rcap v'
 
 rabWriteBytes rab offset bs = do
-  rabCheckLimit rab (offset + fromIntegral (BS.length bs))
-  mapM_ (\n -> rabWriteWord8_ rab (offset + fromIntegral n) (BS.index bs n)) [0..BS.length bs - 1]
+  if BS.null bs
+    then return ()
+    else do
+      rabCheckLimit rab (offset + fromIntegral (BS.length bs))
+      mapM_ (\n -> rabWriteWord8_ rab (offset + fromIntegral n) (BS.index bs n)) [0..BS.length bs - 1]
 
 rabCheckLimit :: ResizableArrayBuilder -> RABOffset -> IO ()
 rabCheckLimit rab@(ResizableArrayBuilder rcap rsiz) !lim = do
@@ -79,7 +88,7 @@ rabCheckLimit rab@(ResizableArrayBuilder rcap rsiz) !lim = do
     else return ()
 
 rabWriteWord8_ :: ResizableArrayBuilder -> RABOffset -> Word8 -> IO ()
-rabWriteWord8_ !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
+rabWriteWord8_ !_rab@(ResizableArrayBuilder rcap _rsiz) !offset !value = do
   v <- readIORef rcap
   let !o = fromIntegral offset
   V.write v o value
@@ -92,18 +101,18 @@ rabWriteBit !rab !offset !bitoff !value = do
   rabWriteWord8_ rab (offset + fromIntegral q) w'
  
 rabWriteWord8 :: ResizableArrayBuilder -> RABOffset -> Word8 -> IO ()
-rabWriteWord8 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
+rabWriteWord8 !rab !offset !value = do
   rabCheckLimit rab offset
   rabWriteWord8_ rab offset value
 
 rabWriteWord16 :: ResizableArrayBuilder -> RABOffset -> Word16 -> IO ()
-rabWriteWord16 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
+rabWriteWord16 !rab !offset !value = do
   rabCheckLimit rab (offset + 1)
   rabWriteWord8_ rab (offset + 1) (fromIntegral (value `shiftR` 8) :: Word8)
   rabWriteWord8_ rab (offset + 0) (fromIntegral (value           ) :: Word8)
 
 rabWriteWord32 :: ResizableArrayBuilder -> RABOffset -> Word32 -> IO ()
-rabWriteWord32 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
+rabWriteWord32 !rab !offset !value = do
   rabCheckLimit rab (offset + 3)
   rabWriteWord8_ rab (offset + 3) (fromIntegral (value `shiftR` 24) :: Word8)
   rabWriteWord8_ rab (offset + 2) (fromIntegral (value `shiftR` 16) :: Word8)
@@ -111,7 +120,7 @@ rabWriteWord32 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
   rabWriteWord8_ rab (offset + 0) (fromIntegral (value            ) :: Word8)
 
 rabWriteWord64 :: ResizableArrayBuilder -> RABOffset -> Word64 -> IO ()
-rabWriteWord64 !rab@(ResizableArrayBuilder rcap rsiz) !offset !value = do
+rabWriteWord64 !rab !offset !value = do
   rabWriteWord32 rab (offset + 4) (fromIntegral (value `shiftR`  32) :: Word32)
   rabWriteWord32 rab (offset + 0) (fromIntegral (value             ) :: Word32)
 

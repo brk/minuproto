@@ -91,6 +91,7 @@ def interpretations_of(off_words, bytes_arr):
         else:
           if not likely_ascii(bytes_arr):
             interps.append("list ptr, but offset seems bogus")
+            interps.append("ascii: " + ''.join([chr(int(x, 16)) for x in bytes_arr]))
 
     if iL(0,2) == 0:
         offset = iL(2,30)
@@ -109,10 +110,12 @@ def interpretations_of(off_words, bytes_arr):
         else:
           if not likely_ascii(bytes_arr):
             interps.append("struct ptr, but offset seems bogus")
+            interps.append("ascii: " + ''.join([chr(int(x, 16)) for x in bytes_arr]))
     return interps
 
 def likely_ascii(bytes):
-  too_many_zeros = count_zeros(bytes) >= len(bytes)/2
+  #too_many_zeros = count_zeros(bytes) >= len(bytes)/2
+  too_many_zeros = count_zeros(bytes) >= len(bytes)-2
   return all(likely_ascii_char(x) for x in bytes) and not too_many_zeros
 
 def count_zeros(strs):
