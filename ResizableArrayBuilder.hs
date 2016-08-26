@@ -9,9 +9,10 @@ import Data.Bits
 import Data.Word
 import Data.Int
 
+import Foreign.Ptr(Ptr, plusPtr)
+import Foreign.Storable(poke)
 import Data.Primitive.ByteArray
-import Data.Primitive.Types(Addr(Addr))
-import Data.ByteString.Unsafe
+import qualified Data.ByteString.Internal as BSI
 
 type RABOffset = Int
 
@@ -24,18 +25,16 @@ rabToByteString (ResizableArrayBuilder rcap rsiz) = do
   s <- readIORef rsiz
   if s == 0
     then return BS.empty
-    else case v of V.MVector _off _len mba -> do
-                     pba <- newPinnedByteArray s
-                     copyMutableByteArray pba 0 mba 0 s
-
-                     writeIORef rcap (V.MVector _off _len pba)
-
-                     -- At first I tried using the copied bytes as the contents
-                     -- of the packed bytestring, but the seemingly-correct thing
-                     -- of freezing pba and then getting its contents did not
-                     -- actually preserve referential transparency.
-                     let !(Addr addr_) = mutableByteArrayContents mba
-                     unsafePackAddressLen s addr_
+    else
+      case v of
+        V.MVector _off _len mba -> do
+          let go :: Ptr Word8 -> Int -> IO ()
+              go !p !n =
+                if n >= s then return ()
+                          else do w <- readByteArray mba n
+                                  poke p w
+                                  go (p `plusPtr` 1) (n + 1)
+          BSI.create s (\p -> go p _off)
 
 rabPadToAlignment rab align = do
   sz <- rabSize rab
@@ -99,7 +98,7 @@ rabWriteBit !rab !offset !bitoff !value = do
   w <- rabReadWord8 rab (offset + fromIntegral q)
   let !w' = if value then setBit w r else clearBit w r
   rabWriteWord8_ rab (offset + fromIntegral q) w'
- 
+
 rabWriteWord8 :: ResizableArrayBuilder -> RABOffset -> Word8 -> IO ()
 rabWriteWord8 !rab !offset !value = do
   rabCheckLimit rab offset
