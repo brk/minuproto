@@ -214,7 +214,11 @@ accessorNameForType type_ =
 -- to CodeGeneratorRequest and friends.
 
 mkCodeGeneratorRequest :: Object -> CodeGeneratorRequest
+-- For versions of capnp prior to 0.6.0
 mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles]) =
+  CodeGeneratorRequest (mapL mkNode nodes) (mapL mkRequestedFile reqfiles)
+-- For post-0.6.0 capnp
+mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles, version]) =
   CodeGeneratorRequest (mapL mkNode nodes) (mapL mkRequestedFile reqfiles)
 mkCodeGeneratorRequest other = error $ "mkCodeGeneratorRequest $ " ++ show other
 
