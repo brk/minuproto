@@ -75,7 +75,7 @@ rabWriteBytes rab offset bs = do
   if BS.null bs
     then return ()
     else do
-      rabCheckLimit rab (offset + fromIntegral (BS.length bs))
+      rabCheckLimit rab (offset + fromIntegral (BS.length bs - 1))
       mapM_ (\n -> rabWriteWord8_ rab (offset + fromIntegral n) (BS.index bs n)) [0..BS.length bs - 1]
 
 rabCheckLimit :: ResizableArrayBuilder -> RABOffset -> IO ()

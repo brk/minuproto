@@ -711,12 +711,12 @@ sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off !min_pad = do
     let !num_elts = BS.length utf8 + min_pad
     let !num_pad_bytes = let excess = num_elts `mod` 8 in
                           if excess == 0 then 0 else 8 - excess
-    --putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes) min_pad)
+    --putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. " ++ show min_pad ++ " terminator bytes), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes) min_pad)
     --putStrLn $ "text ptr is at " ++ show ptr_off ++ " and text data is at " ++ show data_off
     --bp <- rabSize rab
     --putStrLn $ "before padding, nextoffset will be " ++ show bp
     rabWriteBytes rab data_off utf8
-    if num_pad_bytes > 0
+    if num_pad_bytes > 0 || min_pad > 0
       then do mapM_ (\o -> do rabWriteWord8 rab o 0x00) (padbyte_offsets o (fromIntegral num_pad_bytes) min_pad)
       else return ()
 
