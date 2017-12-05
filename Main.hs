@@ -174,7 +174,6 @@ targetHaskell = TargetLanguage
                           , text "import ResizableArrayBuilder"
                           , text "import Data.Word"
                           , text "import Data.Int"
-                          , text "import Data.Text(Text)"
                           , text "type BytesSlice = ByteString"
                           , empty
                           ]
@@ -498,14 +497,14 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
                      (txCall [text "serializeWith", text "obj", fnname])
     <$> fnDefinition fnname (splitArgs "obj rab ptr_off data_off")
                      [text dname, text "ResizableArrayBuilder", cgOffsetType, cgOffsetType] (retTy (emitIO "()"))
-                     (doblock [letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))]
-                              ,srCall (split " " $ helperForStructSerializer nodeid ++ " obj rab data_off nextoffset")
+                     (doblock [letbinds [("_nextoffset", emitAdd "data_off" (show (8 * size)))]
+                              ,srCall (split " " $ helperForStructSerializer nodeid ++ " obj rab data_off _nextoffset")
                               ,srCall ["sr_ptr_struct", "rab", "ptr_off", show sizedata, show (size - sizedata),
                                             show (txCall [text "delta_in_words", text "data_off",
                                                           emitAdd "ptr_off" "8"])]])
-    <$> comment (text $ "Serialize the given object to data_off, with sub-objects serialized to nextoffset")
+    <$> comment (text $ "Serialize the given object to data_off, with sub-objects serialized to _nextoffset")
     <$> fnDefinition (text (helperForStructSerializer nodeid))
-                     (splitArgs "obj rab data_off nextoffset") noArgTys noRetTy
+                     (splitArgs "obj rab data_off _nextoffset") noArgTys noRetTy
                      (doblock [
                           letbinds [("ptrs_off", emitAdd "data_off" (show (8 * sizedata)))]
                          ,if nodeStruct_discriminantCount node == 0
@@ -560,14 +559,14 @@ emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup n
   let size    =  nodeStruct_pointerCount node + sizedata
   return $
     fnDefinition (serializerForGroup nodeid)
-                 (splitArgs "rab obj nextoffset data_off ptrs_off") noArgTys noRetTy
-              (doblock $ (letbinds [("nextoffset", emitAdd "data_off" (show (8 * size)))])
+                 (splitArgs "rab obj _nextoffset data_off ptrs_off") noArgTys noRetTy
+              (doblock $ (letbinds [("_nextoffset", emitAdd "data_off" (show (8 * size)))])
                          :concatMap (emitFieldSerializer dname) (nodeStruct_fields node))
 
 emitNodeUnionSerializer node@(NodeStruct {}) dname nodeid | nodeStruct_isGroup node /= 0 && nodeStruct_discriminantCount node > 0 = do
   return $
     fnDefinition (serializerForGroup nodeid)
-                 (splitArgs "rab obj nextoffset data_off ptrs_off")
+                 (splitArgs "rab obj _nextoffset data_off ptrs_off")
                  noArgTys noRetTy
                  (doblock [letbinds [("absDiscrimOff", emitAdd "data_off" (show (2 * (nodeStruct_discriminantOffset node))))]
                           ,match "obj" [
@@ -606,8 +605,8 @@ emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
     KindPtr ->
       [txCall [serializerForFieldType f t,
                      callFieldAccessor typename f "obj",
-                     text "rab",  (emitAdd "ptrs_off" (show offsetInBytes)), text "nextoffset"]
-      ,emitRebind (text "nextoffset") (srCall ["updateNextOffset", "rab", "nextoffset"])]
+                     text "rab",  (emitAdd "ptrs_off" (show offsetInBytes)), text "_nextoffset"]
+      ,emitRebind (text "_nextoffset") (srCall ["updateNextOffset", "rab", "_nextoffset"])]
     KindData ->
       [txCall [serializerForFieldType f t, text "rab", callFieldAccessor typename f "obj",
               (emitAdd "data_off" (show offsetInBytes))]]
@@ -616,7 +615,7 @@ emitFieldSerializer typename f | (FieldSlot w t _) <- fieldUnion f =
 emitFieldSerializer typename f | (FieldGroup w) <- fieldUnion f =
   [txCall [serializerForGroup w,
            text "rab", callFieldAccessor typename f "obj",
-           text "nextoffset", text "data_off", text "ptrs_off"]
+           text "_nextoffset", text "data_off", text "ptrs_off"]
      <+> comment (text $ "serialize group '" ++ fieldName_ f ++ "'")]
 
 getFieldAccessor typename f =
@@ -642,7 +641,7 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid | nodeStruct_discriminant
                       (ifthen (srCall ["isDefaultObj", "objd"])
                          (doerror $ "Unset value in non-optional field of type " ++ show dname)
                          (matchOrDie "objd" fnname
-                            [(text "StructObj bs ptrs"
+                            [(text "StructObj _bs ptrs"
                              ,(match (show (extractData Type_UInt16 discoffb))
                                 [(pretty d, fieldAccessor)
                                 | (d, fieldAccessor) <- zip (map fieldDiscriminant discriminatedFields)
@@ -659,12 +658,12 @@ emitNodeUnionBuilder node@(NodeStruct {}) dname nodeid = do
                          (ifthen (srCall ["isDefaultObj", "obj"])
                            (doerror $ "Unset value in non-optional field of type " ++ show dname)
                            (matchOrDie "obj" fnname
-                              [(text "StructObj bs ptrs",
+                              [(text "StructObj _bs ptrs",
                                (doblock [txCall (text dname:fieldAccessors)]))]))
-        <$> fnDefinition (text $ "pr" ++ dname) [text "bs", text "segs", text "loc"]
+        <$> fnDefinition (text $ "pr" ++ dname) [text "_bs", text "segs", text "loc"]
                                         [text "BytesSlice", text "List BytesSlice", text "Int64"] (retTy $ text dname)
-                         (txCall [text "parsePointee", text "bs", text "segs", makerForType' (Type_Struct nodeid), text "loc"])
-        <$> fnDefinition (makerForType' (Type_Struct nodeid)) [text "bs", text "segs", text "off"]
+                         (txCall [text "parsePointee", text "_bs", text "segs", makerForType' (Type_Struct nodeid), text "loc"])
+        <$> fnDefinition (makerForType' (Type_Struct nodeid)) [text "_bs", text "segs", text "off"]
                                         [text "BytesSlice", text "List BytesSlice", text "Int64"] (retTy $ text dname)
                          (doblock [txCall (text dname:fieldAccessors')])
 
@@ -703,9 +702,9 @@ emitFieldAccessor f | FieldSlot w t v <- fieldUnion f = do
 ------------------------------------------------------------------------
 extractData :: (?tgt::TargetLanguage, Show num) => Type_ -> num -> Doc
 extractData t offset =
-  let accessor = srCall [accessorNameForType t, show offset, "bs"] in
+  let accessor = srCall [accessorNameForType t, show offset, "_bs"] in
   case t of
-    Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
+    Type_Bool   -> srCall [accessorNameForType t, show offset, "_bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
     _           -> accessor
 
@@ -764,9 +763,9 @@ emitFieldAccessor' node f | FieldSlot w t v <- fieldUnion f = do
 
 extractData' :: (?tgt::TargetLanguage) => Type_ -> Int -> Doc
 extractData' t offset =
-  let accessor = txCall [text (accessorNameForType t), emitAdd64 (show $ emitMul64 "8" "off") (show offset), text "bs"] in
+  let accessor = txCall [text (accessorNameForType t), emitAdd64 (show $ emitMul64 "8" "off") (show offset), text "_bs"] in
   case t of
-    Type_Bool   -> srCall [accessorNameForType t, show offset, "bs"]
+    Type_Bool   -> srCall [accessorNameForType t, show offset, "_bs"]
     Type_Enum w -> parens $ text ("mk_enum_" ++ show w) <+> accessor
     _           -> accessor
 
@@ -775,25 +774,25 @@ extractPtr' f msg t offset =
   let offset_ = offset in
   parens $
     case t of
-     Type_List Type_Void  -> txCall [text "parseVoidListFrom", text "bs", text "segs", emitAdd64 "off" (show offset_)]
-     Type_List Type_Bool  -> txCall [text "parseBitListFrom",  text "bs", text "segs", emitAdd64 "off" (show offset_)]
-     Type_List Type_UInt8 -> txCall [text "parseBytesFrom", text "bs", text "segs", emitAdd64 "off" (show offset_)]
+     Type_List Type_Void  -> txCall [text "parseVoidListFrom", text "_bs", text "segs", emitAdd64 "off" (show offset_)]
+     Type_List Type_Bool  -> txCall [text "parseBitListFrom",  text "_bs", text "segs", emitAdd64 "off" (show offset_)]
+     Type_List Type_UInt8 -> txCall [text "parseBytesFrom", text "_bs", text "segs", emitAdd64 "off" (show offset_)]
      Type_List      x     ->
                       if isFieldOptional f
-                        then txCall [text "parseListFromMb", text "bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
-                        else txCall [text "parseListFrom  ", text "bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
+                        then txCall [text "parseListFromMb", text "_bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
+                        else txCall [text "parseListFrom  ", text "_bs", text "segs", extractPtrFunc x, emitAdd64 "off" (show offset_)]
      Type_Struct    _     ->
                       if isFieldOptional f
-                        then txCall [text "parsePointeeMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
-                        else txCall [text "parsePointee  ", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        then txCall [text "parsePointeeMb", text "_bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [text "parsePointee  ", text "_bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
      Type_Text        ->
                       if isFieldOptional f
-                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
-                        else txCall [extractPtrFunc t, text "bs", text "segs", emitAdd64 "off" (show offset)]
+                        then txCall [text "parsePointerMb", text "_bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "_bs", text "segs", emitAdd64 "off" (show offset)]
      Type_Data        ->
                       if isFieldOptional f
-                        then txCall [text "parsePointerMb", text "bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
-                        else txCall [extractPtrFunc t, text "bs", text "segs", emitAdd64 "off" (show offset_)]
+                        then txCall [text "parsePointerMb", text "_bs", text "segs", extractPtrFunc t, emitAdd64 "off" (show offset_)]
+                        else txCall [extractPtrFunc t, text "_bs", text "segs", emitAdd64 "off" (show offset_)]
      Type_Interface _ -> text "<unsupported extractPtr type:" <+> text (show t)
      Type_Object      -> text "<unsupported extractPtr type:" <+> text (show t)
      _ -> error $ "extractPtr saw unexpected type " ++ show t
