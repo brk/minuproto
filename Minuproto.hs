@@ -631,7 +631,7 @@ sr_list_of_Type_Text texts rab ptr_off data_off = do
   sr_ptr_list rab ptr_off 6 num_txt_ptrs (delta_in_words data_off (ptr_off + 8))
   go texts data_off (data_off + (8 * num_txt_ptrs))
     where go []           _    _     = return ()
-          go (text:rest) !poff !doff = do nwritten <- sr_Type_Text' text rab poff doff
+          go (text:rest) !poff !doff = do nwritten <- sr_Type_Text' text rab poff doff 1
                                           go rest (poff + 8) (doff + fromIntegral nwritten)
 
 sr_list_of_Type_Bool bools rab ptr_off data_off = do
@@ -675,10 +675,12 @@ sr_Type_Bool rab b data_off bit_off = do
 
 sr_Type_Data :: ByteString -> ResizableArrayBuilder -> Offset -> Offset -> IO ()
 sr_Type_Data !val !rab !ptr_off !data_off = do
-  rabWriteBytes rab data_off val
-  sr_ptr_list rab ptr_off 2 (fromIntegral $ BS.length val) (delta_in_words data_off (ptr_off + 8))
+  _ <- sr_Type_Text' (val, ()) rab ptr_off data_off 0
+  return ()
 
-padbyte_offsets o n = [o.. o + n]
+padbyte_offsets :: Int -> Int -> Int -> [Int]
+padbyte_offsets o n 1 = [o.. o + n]
+padbyte_offsets o n _ = [o.. (o + n - 1)]
 
 isDefaultObj (StructObj bs []) = BS.length bs == 0
 isDefaultObj (ListObj      [] _) = True
@@ -699,23 +701,24 @@ debugStr s = if False then putStrLn s else return ()
 
 sr_Type_Text :: (ByteString, ()) -> ResizableArrayBuilder -> Offset -> Offset -> IO ()
 sr_Type_Text !text !rab !ptr_off !data_off = do
-  _ <- sr_Type_Text' text rab  ptr_off  data_off
+  _ <- sr_Type_Text' text rab  ptr_off  data_off 1
   return ()
 
 -- Returns number of *bytes* written, including nul/padding bytes.
-sr_Type_Text' :: (ByteString, ()) -> ResizableArrayBuilder -> Offset -> Offset -> IO Int
-sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off = do
+sr_Type_Text' :: (ByteString, ()) -> ResizableArrayBuilder -> Offset -> Offset -> Int -> IO Int
+sr_Type_Text' !(utf8, _txt) !rab !ptr_off !data_off !min_pad = do
     let !o = data_off + fromIntegral (BS.length utf8)
-    let !num_elts = BS.length utf8 + 1
+    let !num_elts = BS.length utf8 + min_pad
     let !num_pad_bytes = let excess = num_elts `mod` 8 in
                           if excess == 0 then 0 else 8 - excess
-    --putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes))
+    --putStrLn $ "serializing text of length " ++ show num_elts ++ " (incl. null terminator), with # padding bytes = " ++ show num_pad_bytes ++ " ::: " ++ show (padbyte_offsets o (fromIntegral num_pad_bytes) min_pad)
     --putStrLn $ "text ptr is at " ++ show ptr_off ++ " and text data is at " ++ show data_off
     --bp <- rabSize rab
     --putStrLn $ "before padding, nextoffset will be " ++ show bp
-    -- always writes at least one byte for nul terminator.
     rabWriteBytes rab data_off utf8
-    mapM_ (\o -> do rabWriteWord8 rab o 0x00) (padbyte_offsets o (fromIntegral num_pad_bytes))
+    if num_pad_bytes > 0
+      then do mapM_ (\o -> do rabWriteWord8 rab o 0x00) (padbyte_offsets o (fromIntegral num_pad_bytes) min_pad)
+      else return ()
 
     --bp <- rabSize rab
     --putStrLn $ "after padding, nextoffset will be " ++ show bp
