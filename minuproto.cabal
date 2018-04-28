@@ -58,7 +58,7 @@ library
 
   -- Other library packages from which modules are imported.
   build-depends:
-    base           >=4.9 && <4.11,
+    base           >=4.9 && <5.0,
     bytestring     >=0.10 && <0.11,
     text           >=1.2 && <1.3,
     ansi-wl-pprint >=0.6 && <0.7,
@@ -83,7 +83,7 @@ executable minuproto
 
   -- Other library packages from which modules are imported.
   build-depends:
-    base           >=4.9 && <4.11,
+    base           >=4.9 && <5.0,
     bytestring     >=0.10 && <0.11,
     text           >=1.2 && <1.3,
     ansi-wl-pprint >=0.6 && <0.7,
