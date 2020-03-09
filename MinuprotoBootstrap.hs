@@ -19,6 +19,8 @@ import Text.PrettyPrint.ANSI.Leijen
 data CodeGeneratorRequest = CodeGeneratorRequest {
     cgrNodes :: [Node]
   , cgrRequestedFiles :: [RequestedFile]
+  --, cgrCapnpVersion :: CapnpVersion
+  --, cgrSourceInfo :: [SourceInfo]
 } deriving Show
 
 data Node = Node { nodeId :: Word64
@@ -28,6 +30,25 @@ data Node = Node { nodeId :: Word64
                  , nodeUnion :: NodeUnion
                  , nodeNestedNodes :: [NestedNode]
 } deriving Show
+
+{-
+data CapnpVersion =
+     CapnpVersion { capnpVersion_major :: Int
+                  , capnpVersion_minor :: Int
+                  , capnpVersion_micro :: Int
+     } deriving Show
+
+data SourceInfo =
+     SourceInfo { sourceInfo_id :: String
+                , sourceInfo_docComment :: String
+                , sourceInfo_members :: [SourceInfoMember]
+     } deriving Show
+
+data SourceInfoMember =
+     SourceInfoMember {
+                  sourceInfoMember_docComment :: String
+     } deriving Show
+-}
 
 data NestedNode =
      NestedNode { nestedNode_name :: String
@@ -217,10 +238,16 @@ mkCodeGeneratorRequest :: Object -> CodeGeneratorRequest
 -- For versions of capnp prior to 0.6.0
 mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles]) =
   CodeGeneratorRequest (mapL mkNode nodes) (mapL mkRequestedFile reqfiles)
--- For post-0.6.0 capnp
-mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles, version]) =
+-- For capnp 0.6.0
+mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles, _version]) =
   CodeGeneratorRequest (mapL mkNode nodes) (mapL mkRequestedFile reqfiles)
-mkCodeGeneratorRequest other = error $ "mkCodeGeneratorRequest $ " ++ show other
+-- For capnp 0.7.0+
+mkCodeGeneratorRequest (StructObj _bs [nodes, reqfiles, _version, _sourceInfo]) =
+  CodeGeneratorRequest (mapL mkNode nodes) (mapL mkRequestedFile reqfiles)
+mkCodeGeneratorRequest (StructObj _bs items) =
+                               error $ "mkCodeGeneratorRequest with " ++ show (length items) ++ "items:\n"
+                                                                      ++ show (StructObj _bs items)
+mkCodeGeneratorRequest other = error $ "mkCodeGeneratorRequest without a StructObj? $ " ++ show other
 
 mkRequestedFile (StructObj bs [name, _imports]) = RequestedFile id (unStrObj name)
   where id = bs64 0 bs

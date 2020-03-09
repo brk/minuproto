@@ -10,7 +10,7 @@ name:                minuproto
 -- PVP summary:      +-+------- breaking API changes
 --                   | | +----- non-breaking API additions
 --                   | | | +--- code changes with no API change
-version:             0.1.0.3
+version:             0.1.0.4
 
 -- A short (one-line) description of the package.
 synopsis:            (incomplete) Cap'n Proto serialization library
@@ -58,7 +58,7 @@ library
 
   -- Other library packages from which modules are imported.
   build-depends:
-    base           >=4.9 && <5.0,
+    base           >=4.9,
     bytestring     >=0.10,
     text           >=1.2,
     ansi-wl-pprint >=0.6,
@@ -83,7 +83,7 @@ executable minuproto
 
   -- Other library packages from which modules are imported.
   build-depends:
-    base           >=4.9 && <5.0,
+    base           >=4.9,
     bytestring     >=0.10,
     text           >=1.2,
     ansi-wl-pprint >=0.6,

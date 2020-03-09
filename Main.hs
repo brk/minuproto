@@ -36,7 +36,6 @@ main = do
   let cgr = mkCodeGeneratorRequest obj
   --putStrLn $ "obj is:"
   --putDoc $ pretty obj <> line
-  --putDoc $ hs_code_doc
   generateCodeForTarget targetHaskell cgr
   generateCodeForTarget targetFoster  cgr
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 import fileinput
@@ -21,7 +21,7 @@ def main():
 
     for line in fileinput.input():
         if line.startswith('+++') or line.startswith('---') or line.startswith('@@'):
-            print line,
+            print(line, end='')
             continue
 
         n = n + 1
@@ -29,16 +29,16 @@ def main():
         m = re.match(r".?([0-9a-f]{7}) ((?: [0-9a-f]{2})+)", line)
         try:
           offset_bytes = int(m.group(1), 16)
-          offset_words = offset_bytes / 8
+          offset_words = int(offset_bytes / 8)
 
-          bytes = m.group(2).strip().split(' ')
+          bytevals = m.group(2).strip().split(' ')
 
           if n == 1:
-              print line,
+              print(line, end='')
           else:
-              print line.rstrip(), interpretations_of(offset_words, bytes)
+              print(line.rstrip(), interpretations_of(offset_words, bytevals))
         except:
-          print line,
+          print(line, end='')
 
 dataof = {}
 ptrsof = {}
@@ -54,7 +54,7 @@ def interpretations_of(off_words, bytes_arr):
 
     # stored MSB-to-LSB, as conventionally written
     bitsM = ''.join(bits_of_hexdigit_char(c) for c in bytes_chars)
-    print 'M->' + bitsM + '<-L',
+    print('M->' + bitsM + '<-L', end='')
 
     # parses n bits starting o from the MSB
     def iM(o, n):
