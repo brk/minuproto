@@ -11,7 +11,7 @@ import qualified Data.ByteString as BS
 import Data.ByteString(ByteString)
 import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
-import Text.PrettyPrint.ANSI.Leijen
+import Prettyprinter
 
 ---------------------------------------------------------------------
 -- Representation of schema.capnp as a hand-written Haskell datatype:

@@ -17,7 +17,9 @@ import Data.Char(toUpper, isDigit)
 import Data.List((!!), foldl')
 import Data.Binary.IEEE754(floatToWord, wordToFloat, doubleToWord, wordToDouble)
 
-import Text.PrettyPrint.ANSI.Leijen
+import qualified Prettyprinter as PP
+import Prettyprinter hiding (Doc)
+import qualified Prettyprinter.Render.Terminal as PPT
 
 import Debug.Trace(trace)
 
@@ -28,6 +30,14 @@ import Data.List(intersperse, isPrefixOf)
 
 import Control.Monad.State
 import System.IO(withFile, IOMode(WriteMode), stdin, stdout)
+
+type Doc = PP.Doc PPT.AnsiStyle
+
+empty :: PP.Doc ann
+empty = mempty
+
+renderPretty ribbonFraction pageWidth d =
+  layoutSmart LayoutOptions { layoutPageWidth = AvailablePerLine pageWidth (realToFrac ribbonFraction) } d
 
 main = do
   rawbytes <- BS.hGetContents stdin
@@ -55,7 +65,7 @@ generateCodeForTarget target cgr = do
         putStrLn $ "writing to output file " ++ f
         withFile f WriteMode (\h -> hPutDocWide h d)
 
-      hPutDocWide h d = displayIO h (renderPretty 0.9 110 d)
+      hPutDocWide h d = PPT.renderIO h (renderPretty 0.9 110 d)
 
 ------------------------------------------------------------
 moduleNameOf str = capitalizeFirstLetter $ replaceWith '.' '_' str
@@ -586,7 +596,7 @@ emitNodeUnionSerializer node@(NodeEnum {}) dname nodeid = do
                        ,srCall (split " " "rabWriteWord16 rab offset value")])
 
 emitNodeUnionSerializer node dname nodeid = do
-  return $ comment $ string (show (dname, nodeid, node))
+  return $ comment $ pretty (show (dname, nodeid, node))
 
 -------------------------------
 
@@ -949,7 +959,5 @@ nodeDisplayName n = legalizeTypeName $ nodeDisplayName_ n
 quoted d = squote <> d <> squote
 quotedStr s = quoted (text s)
 
-instance Pretty Word16 where pretty w = text (show w)
-instance Pretty Word32 where pretty w = pretty (show w)
 instance Pretty Type_  where pretty w = pretty (show w)
 

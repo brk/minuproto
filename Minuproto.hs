@@ -34,17 +34,23 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
 import qualified Data.ByteString.Internal as BS(c2w)
-import qualified Data.ByteString.Lazy.Builder as BD
+import qualified Data.ByteString.Builder as BD
 import qualified Data.ByteString.Lazy as LBS
 import Data.Monoid(mappend)
 
 import ResizableArrayBuilder
 
-import Text.PrettyPrint.ANSI.Leijen
+import Prettyprinter
+import Prettyprinter.Render.Terminal
 
 import Debug.Trace(trace)
 
 import Control.Monad.State
+
+(<$>) = \x y -> x <> line <> y
+
+text :: String -> Doc ann
+text s = pretty s
 
 ---------------------------------------------------------------------
 type Offset = Int
@@ -422,13 +428,13 @@ mk_Int8 :: Object -> Int8
 mk_Int8 (BytesObj bs) = bs8i 0 bs
 
 instance Pretty Object where
-  pretty (StructObj bs    []     ) | BS.null bs = text "{{}}"
-  pretty (ListObj         []   _ ) = text "{[]}"
-  pretty (StructObj bs    objects) = parens $ text "StructObj" <$> indent 4 (text $ show bs)
+  pretty (StructObj bs    []     ) | BS.null bs = pretty "{{}}"
+  pretty (ListObj         []   _ ) = pretty "{[]}"
+  pretty (StructObj bs    objects) = parens $ pretty "StructObj" <$> indent 4 (pretty $ show bs)
                                                                <$> indent 4 (pretty objects)
-  pretty (ListObj         objects _) = parens $ text "ListObj"   <+> indent 4 (pretty objects)
-  pretty (InvalidObj          str) = parens $ text "InvalidObj:" <+> text str
-  pretty (StrObj              str) = text (show str)
+  pretty (ListObj         objects _) = parens $ pretty "ListObj"   <+> indent 4 (pretty objects)
+  pretty (InvalidObj          str) = parens $ pretty "InvalidObj:" <+> pretty str
+  pretty (StrObj              str) = pretty $ show str
 
 parseUnknownPointerAt :: String -> ByteString -> [ByteString] -> Int64 -> Pointer
 parseUnknownPointerAt msg bs segs o =
@@ -592,7 +598,8 @@ parseBytes rawbytes =
   let obj = parseSegment seg segments in
   obj
 
-instance Pretty Word64 where pretty w = text (show w)
+prettyW64 w = text $ show w
+--instance Pretty Word64 where pretty w = text (show w)
 
 roundUpToNextMultipleOf8 k = (k + 7) .&. (complement 7)
 
